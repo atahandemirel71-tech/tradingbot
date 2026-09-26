@@ -11,7 +11,7 @@ import pandas as pd
 
 from .config import BotConfig
 from .risk import DailyLossGuard, TotalLossGuard, lot_size
-from .strategy import Signal, generate_signal, stop_levels
+from .strategy import Signal, add_indicators, generate_signal, stop_levels, trailed_stop
 
 log = logging.getLogger(__name__)
 
@@ -151,6 +151,9 @@ class Trader:
             return  # nothing new since last evaluation
         self._last_bar[symbol] = last_time
 
+        if p.trailing_atr_mult > 0 or p.breakeven_at_r > 0:
+            self._trail_stops(symbol, bars)
+
         result = generate_signal(bars, p)
         log.info("%s [%s] bar %s close=%.5f -> %s (%s)", symbol, self.cfg.timeframe, last_time,
                  result.close, result.signal.value, result.reason)
@@ -182,6 +185,42 @@ class Trader:
             return
         self._open(symbol, result, account, len(positions))
 
+    def _trail_stops(self, symbol: str, bars: pd.DataFrame) -> None:
+        """Move stop losses of open bot positions after a closed bar (same rule as the backtest)."""
+        p = self.cfg.strategy
+        mine = [pos for pos in self.client.positions(self.cfg.magic_number) if pos.symbol == symbol]
+        if not mine:
+            return
+        spec = self.client.symbol_spec(symbol)
+        quote = self.client.quote(symbol)
+        if spec is None or quote is None:
+            return
+        d = add_indicators(bars, p)
+        span = d["time"].diff().median()
+        for pos in mine:
+            if pos.time is None or pos.sl <= 0:
+                continue
+            since = d[d["time"] > pos.time - span]          # bars from the entry bar onward
+            before = d[d["time"] <= pos.time - span]        # signal bar = last bar before entry
+            if since.empty or before.empty:
+                continue
+            initial_risk = float(before["atr"].iloc[-1]) * p.sl_atr_mult
+            best = float(since["high"].max()) if pos.side is Signal.BUY else float(since["low"].min())
+            new_sl = round(trailed_stop(pos.side, pos.price_open, pos.sl, initial_risk, best,
+                                        float(d["atr"].iloc[-1]), p), spec.digits)
+            improves = new_sl > pos.sl if pos.side is Signal.BUY else new_sl < pos.sl
+            if not improves or abs(new_sl - pos.sl) < spec.point:
+                continue
+            bid, ask = quote
+            price = bid if pos.side is Signal.BUY else ask
+            if abs(price - new_sl) < (spec.stops_level + 1) * spec.point:
+                continue  # too close to the market for the broker; retry next bar
+            log.info("%s: move SL #%s %.5f -> %.5f", symbol, pos.ticket, pos.sl, new_sl)
+            if self.cfg.dry_run:
+                log.info("%s: dry_run=true, SL change NOT sent", symbol)
+                continue
+            self.client.modify_stops(pos, new_sl, pos.tp)
+
     # ---------- actions ----------
     def _open(self, symbol: str, result, account, open_count: int) -> None:
         r = self.cfg.risk
@@ -209,10 +248,10 @@ class Trader:
         entry = ask if result.signal is Signal.BUY else bid
         sl, tp = stop_levels(result.signal, entry, result.atr, self.cfg.strategy)
         min_dist = (spec.stops_level + 1) * spec.point
-        if abs(entry - sl) < min_dist or abs(entry - tp) < min_dist:
+        if abs(entry - sl) < min_dist or (tp and abs(entry - tp) < min_dist):
             log.info("%s: SL/TP closer than broker minimum (%d points), skipping", symbol, spec.stops_level)
             return
-        sl, tp = round(sl, spec.digits), round(tp, spec.digits)
+        sl, tp = round(sl, spec.digits), (round(tp, spec.digits) if tp else 0.0)
 
         volume = lot_size(account.balance, r.risk_per_trade_pct, abs(entry - sl), spec)
         if volume <= 0:

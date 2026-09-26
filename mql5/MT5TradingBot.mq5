@@ -1,12 +1,13 @@
 //+------------------------------------------------------------------+
 //|                                               MT5TradingBot.mq5  |
-//|  Trendfoljande Expert Advisor: EMA-kors + RSI + EMA 200 + ADX,   |
-//|  ATR-baserad SL/TP, riskbaserad lotstorlek, dags- och total-     |
+//|  Trendfoljande Expert Advisor: EMA-kors + RSI + EMA 200, ATR-    |
+//|  stop loss med trailing stop och break-even, riskbaserad lot,    |
+//|  dags- och total-                                                |
 //|  forlustgrans (prop-firma), helgstangning och tidsfilter.        |
 //|  Samma regler som Python-boten i detta projekt.                  |
 //+------------------------------------------------------------------+
 #property copyright "MT5 Trading Bot"
-#property version   "1.12"
+#property version   "2.00"
 
 #include <Trade/Trade.mqh>
 
@@ -21,9 +22,11 @@ input int             InpRSIPeriod     = 14;             // RSI-period
 input double          InpRSIOverbought = 70.0;           // Inga kop over denna RSI
 input double          InpRSIOversold   = 30.0;           // Inga salj under denna RSI
 input int             InpATRPeriod     = 14;             // ATR-period
-input double          InpSLATRMult     = 1.5;            // Stop loss = X * ATR
-input double          InpTPATRMult     = 3.0;            // Take profit = X * ATR
-input bool            InpUseADXFilter  = true;           // Handla bara nar det finns en trend (ADX)
+input double          InpSLATRMult     = 2.0;            // Forsta stop loss = X * ATR
+input double          InpTPATRMult     = 0.0;            // Take profit = X * ATR (0 = ingen, vinsten far lopa)
+input double          InpTrailATRMult  = 3.0;            // Trailing stop: X * ATR fran basta priset (0 = av)
+input double          InpBreakevenR    = 1.0;            // Flytta SL till ingangspris vid X * risken i vinst (0 = av)
+input bool            InpUseADXFilter  = false;          // Handla bara nar ADX visar trend
 input int             InpADXPeriod     = 14;             // ADX-period
 input double          InpADXMin        = 25.0;           // Minsta ADX for att handla
 input bool            InpCloseOnOpposite = true;         // Stang och vand vid motsatt signal
@@ -66,7 +69,7 @@ bool     weekendLogged = false;
 //--- Statistik som skrivs ut nar EA:n stoppas / backtesten ar klar
 int      stCrosses = 0, stSkipADX = 0, stSkipTrend = 0, stSkipRSI = 0, stSkipSame = 0;
 int      stSkipSession = 0, stSkipMaxPos = 0, stSkipSpread = 0, stSkipStops = 0, stSkipMinLot = 0;
-int      stOpened = 0, stRejected = 0, stDailyLimit = 0, stWeekend = 0;
+int      stOpened = 0, stRejected = 0, stDailyLimit = 0, stWeekend = 0, stTrailMoves = 0;
 double   stRiskPctSum = 0.0, stRiskPctMax = 0.0, stSpreadMax = 0.0;
 
 //+------------------------------------------------------------------+
@@ -76,8 +79,8 @@ int OnInit()
      { Print("Fel: snabb EMA maste vara mindre an langsam EMA"); return INIT_PARAMETERS_INCORRECT; }
    if(InpRiskPercent <= 0 || InpRiskPercent > 5)
      { Print("Fel: risk per affar maste vara mellan 0 och 5 %"); return INIT_PARAMETERS_INCORRECT; }
-   if(InpSLATRMult <= 0 || InpTPATRMult <= 0)
-     { Print("Fel: ATR-multiplarna maste vara positiva"); return INIT_PARAMETERS_INCORRECT; }
+   if(InpSLATRMult <= 0 || InpTPATRMult < 0 || InpTrailATRMult < 0 || InpBreakevenR < 0)
+     { Print("Fel: stop loss maste vara positiv, TP/trailing/break-even kan inte vara negativa"); return INIT_PARAMETERS_INCORRECT; }
    if(InpFridayCloseHour < 0 || InpFridayCloseHour > 23 || InpSessionStartHour < 0 ||
       InpSessionStartHour > 23 || InpSessionEndHour < 0 || InpSessionEndHour > 23)
      { Print("Fel: timmar maste vara 0-23"); return INIT_PARAMETERS_INCORRECT; }
@@ -155,6 +158,9 @@ void OnTick()
    datetime barTime = iTime(_Symbol, Timeframe(), 0);
    if(barTime == 0 || barTime == lastBarTime)
       return;                        // agera bara en gang per ny candle
+
+   if(InpTrailATRMult > 0 || InpBreakevenR > 0)
+      TrailStops();
 
    int signal = 0;                   // 1 = kop, -1 = salj, 0 = inget
    double atr = 0.0;
@@ -288,10 +294,10 @@ void OpenPosition(int signal, double atr)
    double slDist = atr * InpSLATRMult;
    double tpDist = atr * InpTPATRMult;
    double sl = NormalizeDouble(signal > 0 ? entry - slDist : entry + slDist, digits);
-   double tp = NormalizeDouble(signal > 0 ? entry + tpDist : entry - tpDist, digits);
+   double tp = tpDist > 0 ? NormalizeDouble(signal > 0 ? entry + tpDist : entry - tpDist, digits) : 0.0;
 
    double minDist = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 1) * point;
-   if(MathAbs(entry - sl) < minDist || MathAbs(entry - tp) < minDist)
+   if(MathAbs(entry - sl) < minDist || (tp > 0 && MathAbs(entry - tp) < minDist))
      { stSkipStops++; PrintFormat("%s: SL/TP for nara brokerns minimum - hoppar over", _Symbol); return; }
 
    double volume = LotSize(MathAbs(entry - sl));
@@ -502,9 +508,83 @@ void PrintSummary()
    if(stOpened > 0)
       PrintFormat("Planerad risk per affar: snitt %.2f %%, max %.2f %% (installt %.2f %%)",
                   stRiskPctSum / stOpened, stRiskPctMax, InpRiskPercent);
+   PrintFormat("Stop loss flyttad (trailing/break-even): %d ggr", stTrailMoves);
    PrintFormat("Dagsgrans nadd: %d ggr, helgstangningar: %d, total grans nadd: %s", stDailyLimit, stWeekend,
                halted ? "JA" : "nej");
    PrintFormat("Storsta spread vid signal: %.0f points (max tillatet %d)", stSpreadMax, InpMaxSpreadPoints);
    Print("==============================================================");
+  }
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Trailing stop och break-even efter varje stangd candle.          |
+//| Samma regel som Python-boten och dess backtest.                  |
+//+------------------------------------------------------------------+
+void TrailStops()
+  {
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double minDist = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 1) * point;
+   double atrNow[];
+   if(CopyBuffer(hATR, 0, 1, 1, atrNow) != 1 || atrNow[0] <= 0)
+      return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || PositionGetInteger(POSITION_MAGIC) != InpMagicNumber ||
+         PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      bool   isBuy = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double tp    = PositionGetDouble(POSITION_TP);
+      if(sl <= 0)
+         continue;
+
+      // Stangda candles sedan ingangen: index 1 .. shift (shift = candlen da positionen oppnades).
+      int shift = iBarShift(_Symbol, Timeframe(), (datetime)PositionGetInteger(POSITION_TIME), false);
+      if(shift < 1)
+         continue;
+      double atrSignal[];
+      if(CopyBuffer(hATR, 0, shift + 1, 1, atrSignal) != 1)
+         continue;
+      double initialRisk = atrSignal[0] * InpSLATRMult;
+      double best = isBuy ? iHigh(_Symbol, Timeframe(), iHighest(_Symbol, Timeframe(), MODE_HIGH, shift, 1))
+                          : iLow(_Symbol, Timeframe(), iLowest(_Symbol, Timeframe(), MODE_LOW, shift, 1));
+      if(best <= 0)
+         continue;
+
+      double newSl = sl;
+      if(isBuy)
+        {
+         if(InpBreakevenR > 0 && best - entry >= InpBreakevenR * initialRisk)
+            newSl = MathMax(newSl, entry);
+         if(InpTrailATRMult > 0)
+            newSl = MathMax(newSl, best - InpTrailATRMult * atrNow[0]);
+        }
+      else
+        {
+         if(InpBreakevenR > 0 && entry - best >= InpBreakevenR * initialRisk)
+            newSl = MathMin(newSl, entry);
+         if(InpTrailATRMult > 0)
+            newSl = MathMin(newSl, best + InpTrailATRMult * atrNow[0]);
+        }
+      newSl = NormalizeDouble(newSl, digits);
+      bool improves = isBuy ? newSl > sl + point / 2 : newSl < sl - point / 2;
+      if(!improves)
+         continue;
+      double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      if(MathAbs(price - newSl) < minDist || (isBuy ? newSl >= price : newSl <= price))
+         continue;                  // for nara marknaden - forsok igen nasta candle
+
+      PrintFormat("%s: flyttar SL #%I64u %s -> %s", _Symbol, ticket, DoubleToString(sl, digits), DoubleToString(newSl, digits));
+      if(IsDryRun())
+        { Print("DRY RUN: SL-andring skickades inte"); continue; }
+      if(trade.PositionModify(ticket, newSl, tp))
+         stTrailMoves++;
+      else
+         PrintFormat("Kunde inte flytta SL #%I64u: %s", ticket, trade.ResultRetcodeDescription());
+     }
   }
 //+------------------------------------------------------------------+

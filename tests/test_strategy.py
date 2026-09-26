@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bot.strategy import Signal, StrategyParams, adx, generate_signal, rsi, stop_levels
+from bot.strategy import Signal, StrategyParams, adx, generate_signal, rsi, stop_levels, trailed_stop
 
 
 def bars_from_close(close):
@@ -16,7 +16,8 @@ def bars_from_close(close):
     })
 
 
-PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False)
+PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False,
+                        sl_atr_mult=1.5, tp_atr_mult=3.0, trailing_atr_mult=0, breakeven_at_r=0)
 
 
 def test_not_enough_bars():
@@ -82,10 +83,37 @@ def test_adx_high_in_trend_low_in_range():
 
 def test_adx_filter_blocks_cross_without_trend():
     close = list(np.linspace(1.00, 1.10, 80)) + list(np.linspace(1.10, 1.095, 6))
-    strict = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, adx_min=99)
+    strict = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5,
+                            use_adx_filter=True, adx_min=99)
     results = []
     for extra in np.linspace(1.096, 1.12, 10):
         close.append(extra)
         results.append(generate_signal(bars_from_close(close), strict))
     assert all(r.signal is Signal.NONE for r in results)
     assert any("ADX" in r.reason for r in results)
+
+
+def test_no_take_profit_when_disabled():
+    p = StrategyParams(sl_atr_mult=2.0, tp_atr_mult=0)
+    assert stop_levels(Signal.BUY, 1.1, 0.001, p) == pytest.approx((1.098, 0.0))
+
+
+TRAIL = StrategyParams(trailing_atr_mult=3.0, breakeven_at_r=1.0)
+
+
+def test_trailing_moves_only_in_favour():
+    # Buy at 1.1000, SL 1.0980 (risk 0.0020), ATR 0.0010.
+    assert trailed_stop(Signal.BUY, 1.1, 1.098, 0.002, 1.1010, 0.001, TRAIL) == pytest.approx(1.098)   # not yet
+    assert trailed_stop(Signal.BUY, 1.1, 1.098, 0.002, 1.1020, 0.001, TRAIL) == pytest.approx(1.1)     # breakeven at 1R
+    assert trailed_stop(Signal.BUY, 1.1, 1.1, 0.002, 1.1060, 0.001, TRAIL) == pytest.approx(1.103)     # trails 3 ATR
+    assert trailed_stop(Signal.BUY, 1.1, 1.103, 0.002, 1.1040, 0.001, TRAIL) == pytest.approx(1.103)   # never back
+
+
+def test_trailing_for_sells_mirrors_buys():
+    assert trailed_stop(Signal.SELL, 1.1, 1.102, 0.002, 1.0980, 0.001, TRAIL) == pytest.approx(1.1)
+    assert trailed_stop(Signal.SELL, 1.1, 1.1, 0.002, 1.0940, 0.001, TRAIL) == pytest.approx(1.097)
+
+
+def test_trailing_off_keeps_stop():
+    off = StrategyParams(trailing_atr_mult=0, breakeven_at_r=0)
+    assert trailed_stop(Signal.BUY, 1.1, 1.098, 0.002, 1.2, 0.001, off) == 1.098

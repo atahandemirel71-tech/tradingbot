@@ -91,8 +91,8 @@ def _validate(cfg: BotConfig) -> None:
     s = cfg.strategy
     if s.fast_ema >= s.slow_ema:
         raise ValueError("config: strategy.fast_ema must be smaller than strategy.slow_ema")
-    if s.sl_atr_mult <= 0 or s.tp_atr_mult <= 0:
-        raise ValueError("config: ATR multipliers must be positive")
+    if s.sl_atr_mult <= 0 or s.tp_atr_mult < 0 or s.trailing_atr_mult < 0 or s.breakeven_at_r < 0:
+        raise ValueError("config: sl_atr_mult must be positive; tp/trailing/breakeven cannot be negative")
     r = cfg.risk
     if not 0 < r.risk_per_trade_pct <= 5:
         raise ValueError("config: risk.risk_per_trade_pct must be between 0 and 5")

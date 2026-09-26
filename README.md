@@ -46,10 +46,34 @@ Strategi (trendföljande) på stängda candles, per symbol:
 | EMA-kors | EMA 9 korsar **upp** över EMA 21 | EMA 9 korsar **ned** under EMA 21 |
 | Trendfilter | Pris över EMA 200 | Pris under EMA 200 |
 | RSI-filter | RSI under 70 | RSI över 30 |
-| ADX-filter | ADX minst 25 (det finns en trend) | ADX minst 25 |
+| ADX-filter (av som standard) | ADX minst 25 | ADX minst 25 |
 
-- **Stop loss** = 1,5 × ATR, **Take profit** = 3,0 × ATR (varje affär har alltid SL/TP hos brokern).
+Utgångar – **vinsterna får löpa, förlusterna kapas tidigt**:
+- **Första stop loss** = 2 × ATR från ingången (ligger alltid hos brokern).
+- **Break-even**: när affären är 1 × risken i vinst flyttas stop loss till ingångspriset.
+- **Trailing stop**: stop loss följer det bästa priset sedan ingången på 3 × ATR avstånd och flyttas aldrig tillbaka.
+- **Ingen fast take profit** (kan slås på med `tp_atr_mult`), eftersom en trendstrategi tjänar sina pengar
+  på få stora vinnare som rider hela trenden.
 - Vid motsatt signal stängs positionen och vänds.
+
+### Varför just dessa regler (testresultat)
+
+Testat på riktig EURUSD H1-data (apr 2017 – feb 2018, 5 000 candles, spread 1,2 pip, 0,5 % risk).
+Inställningarna valdes i förväg (standardvärden) och justerades **inte** för att passa datan.
+
+| Variant | Affärer | Vinstfaktor | Avkastning | Max drawdown |
+|---|---|---|---|---|
+| Gammal: fast TP 2R + ADX-filter | 19 | 0,92 | −0,5 % | 2,9 % |
+| Trailing stop + ADX-filter | 19 | 0,34 | −3,4 % | 4,3 % |
+| **Trailing stop + break-even, utan ADX (nuvarande)** | **84** | **1,35** | **+7,1 %** | **6,1 %** |
+
+- Den nuvarande varianten gick plus i **båda** halvorna av perioden var för sig (vinstfaktor 1,39 och 1,29).
+- ADX-filtret tar bort de flesta bra ingångarna, eftersom EMA-korsningar ofta sker när ADX tillfälligt
+  sjunkit under en rekyl. Därför är det av som standard.
+- På slumpdata **utan trend** förlorar strategin (i snitt −4 %). Det är väntat: den tjänar i trender och
+  förlorar lite i sidledes marknad.
+- **Begränsning:** 10 månader EURUSD i en stark uppgång är för lite för att bevisa något. Testa alltid själv
+  på dina symboler och flera år i MT5:s strategitestare innan du handlar på riktigt.
 
 Riskskydd (anpassade för prop-firma-regler som FTMO: max 5 % dagsförlust, max 10 % total förlust):
 - **Positionsstorlek** räknas ut så att en träffad stop loss kostar max `risk_per_trade_pct` (0,5 %) av saldot.

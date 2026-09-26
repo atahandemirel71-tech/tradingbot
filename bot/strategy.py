@@ -27,10 +27,12 @@ class StrategyParams:
     rsi_overbought: float = 70.0
     rsi_oversold: float = 30.0
     atr_period: int = 14
-    sl_atr_mult: float = 1.5
-    tp_atr_mult: float = 3.0
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 0.0         # 0 = no take profit (exit by trailing stop / opposite signal)
+    trailing_atr_mult: float = 3.0   # 0 = off; else SL trails the best price by this many ATR
+    breakeven_at_r: float = 1.0      # 0 = off; else move SL to entry once profit reaches this many R
     use_trend_filter: bool = True
-    use_adx_filter: bool = True
+    use_adx_filter: bool = False     # tested: with EMA crosses it removes most good entries
     adx_period: int = 14
     adx_min: float = 25.0   # only trade when ADX (trend strength) is at least this
 
@@ -156,11 +158,31 @@ def evaluate(prev: Mapping, last: Mapping, p: StrategyParams) -> SignalResult:
 
 
 def stop_levels(signal: Signal, entry: float, atr_value: float, p: StrategyParams) -> tuple[float, float]:
-    """Return (stop_loss, take_profit) prices for an entry."""
+    """Return (stop_loss, take_profit) prices for an entry. take_profit is 0.0 when disabled."""
     sl_dist = atr_value * p.sl_atr_mult
     tp_dist = atr_value * p.tp_atr_mult
     if signal is Signal.BUY:
-        return entry - sl_dist, entry + tp_dist
+        return entry - sl_dist, (entry + tp_dist if tp_dist > 0 else 0.0)
     if signal is Signal.SELL:
-        return entry + sl_dist, entry - tp_dist
+        return entry + sl_dist, (entry - tp_dist if tp_dist > 0 else 0.0)
     raise ValueError("stop_levels needs BUY or SELL")
+
+
+def trailed_stop(side: Signal, entry: float, sl: float, initial_risk: float, best: float,
+                 atr_value: float, p: StrategyParams) -> float:
+    """New stop loss after a closed bar. Only ever moves in the trade's favour.
+
+    ``best`` is the highest high since entry for a buy, the lowest low for a sell.
+    """
+    new = sl
+    if side is Signal.BUY:
+        if p.breakeven_at_r > 0 and best - entry >= p.breakeven_at_r * initial_risk:
+            new = max(new, entry)
+        if p.trailing_atr_mult > 0 and np.isfinite(atr_value) and atr_value > 0:
+            new = max(new, best - p.trailing_atr_mult * atr_value)
+    else:
+        if p.breakeven_at_r > 0 and entry - best >= p.breakeven_at_r * initial_risk:
+            new = min(new, entry)
+        if p.trailing_atr_mult > 0 and np.isfinite(atr_value) and atr_value > 0:
+            new = min(new, best + p.trailing_atr_mult * atr_value)
+    return new

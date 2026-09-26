@@ -12,7 +12,8 @@ from bot.risk import RiskParams, SymbolSpec
 from bot.strategy import Signal, StrategyParams, generate_signal
 from bot.trader import Trader
 
-PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False)
+PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False,
+                        sl_atr_mult=1.5, tp_atr_mult=3.0, trailing_atr_mult=0, breakeven_at_r=0)
 NOW = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)  # a Thursday
 FRIDAY_EVENING = datetime(2026, 1, 2, 21, tzinfo=timezone.utc)
 
@@ -42,7 +43,7 @@ class FakeClient:
         self.bars = bars
         self._positions = list(positions)
         self.equity = equity
-        self.opened, self.closed = [], []
+        self.opened, self.closed, self.modified = [], [], []
 
     def ensure_connected(self):
         return True
@@ -69,6 +70,10 @@ class FakeClient:
     def open_position(self, symbol, side, volume, sl, tp, magic, deviation, comment=""):
         self.opened.append((symbol, side, volume, sl, tp))
         self._positions.append(Position(99, symbol, side, volume, 0.0, 0.0))
+        return True
+
+    def modify_stops(self, pos, sl, tp):
+        self.modified.append((pos.ticket, sl, tp))
         return True
 
     def close_position(self, pos, magic, deviation):
@@ -185,3 +190,20 @@ def test_wide_spread_blocks_entry():
     client = FakeClient(make_bars(buy_series()))
     Trader(make_cfg(max_spread_points=5), client).tick(NOW)
     assert client.opened == []
+
+
+def test_trailing_stop_moved_on_new_bar():
+    from dataclasses import replace
+    close = list(np.linspace(1.00, 1.10, 300))
+    bars = make_bars(close)
+    entry_idx = 250
+    pos = Position(7, "EURUSD", Signal.BUY, 0.1, close[entry_idx], 50.0, sl=close[entry_idx] - 0.003, tp=0.0,
+                   time=bars["time"].iloc[entry_idx].to_pydatetime())
+    client = FakeClient(bars, [pos])
+    cfg = make_cfg()
+    cfg.strategy = replace(PARAMS, tp_atr_mult=0, trailing_atr_mult=3.0, breakeven_at_r=1.0)
+    Trader(cfg, client).tick(NOW)
+    assert client.modified, "stop should have been trailed"
+    ticket, new_sl, tp = client.modified[0]
+    assert ticket == 7 and new_sl > pos.sl and new_sl >= pos.price_open and tp == 0.0
+    assert new_sl < client.quote("EURUSD")[0]

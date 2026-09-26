@@ -36,9 +36,11 @@ strategy:
   rsi_overbought: 70      # inga köp när RSI är över detta
   rsi_oversold: 30        # inga sälj när RSI är under detta
   atr_period: 14
-  sl_atr_mult: 1.5        # stop loss = 1.5 x ATR
-  tp_atr_mult: 3.0        # take profit = 3.0 x ATR
-  use_adx_filter: true    # handla bara när det finns en riktig trend
+  sl_atr_mult: 2.0        # första stop loss = 2 x ATR
+  tp_atr_mult: 0          # take profit = X x ATR, 0 = ingen (vinsten får löpa, trailing stop stänger)
+  trailing_atr_mult: 3.0  # stop loss följer bästa priset på 3 x ATR avstånd, 0 = av
+  breakeven_at_r: 1.0     # flytta stop loss till ingångspris när vinsten är 1 x risken, 0 = av
+  use_adx_filter: false   # true = handla bara när ADX visar trend (gav sämre resultat i test)
   adx_period: 14
   adx_min: 25             # ADX under detta = sidledes marknad, ingen affär
 

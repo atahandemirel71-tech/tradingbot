@@ -25,6 +25,9 @@ class Position:
     volume: float
     price_open: float
     profit: float
+    sl: float = 0.0
+    tp: float = 0.0
+    time: datetime | None = None   # open time (broker server time)
 
 
 @dataclass(frozen=True)
@@ -156,7 +159,8 @@ class MT5Client:
             if p.magic != magic:
                 continue
             side = Signal.BUY if p.type == self.mt5.POSITION_TYPE_BUY else Signal.SELL
-            out.append(Position(p.ticket, p.symbol, side, p.volume, p.price_open, p.profit))
+            out.append(Position(p.ticket, p.symbol, side, p.volume, p.price_open, p.profit,
+                                p.sl, p.tp, datetime.fromtimestamp(p.time, tz=timezone.utc)))
         return out
 
     # ---------- orders ----------
@@ -199,6 +203,15 @@ class MT5Client:
             "comment": comment[:31],
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": self._filling_mode(symbol),
+        })
+
+    def modify_stops(self, pos: Position, sl: float, tp: float) -> bool:
+        return self._send({
+            "action": self.mt5.TRADE_ACTION_SLTP,
+            "symbol": pos.symbol,
+            "position": int(pos.ticket),
+            "sl": float(sl),
+            "tp": float(tp),
         })
 
     def close_position(self, pos: Position, magic, deviation) -> bool:

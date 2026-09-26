@@ -21,7 +21,7 @@ import pandas as pd
 
 from .hours import TradingHours
 from .risk import DailyLossGuard, RiskParams, SymbolSpec, TotalLossGuard, lot_size
-from .strategy import Signal, StrategyParams, add_indicators, evaluate, stop_levels
+from .strategy import Signal, StrategyParams, add_indicators, evaluate, stop_levels, trailed_stop
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,9 @@ class Trade:
     entry_time: pd.Timestamp
     entry_price: float
     sl: float
-    tp: float
+    tp: float                      # 0.0 = no take profit
+    initial_risk: float = 0.0      # price distance to the original stop loss
+    best: float = 0.0              # best price reached (high for buys, low for sells)
     exit_time: pd.Timestamp | None = None
     exit_price: float | None = None
     exit_reason: str = ""
@@ -75,6 +77,7 @@ def run_backtest(
     rows = d.to_dict("records")
     times = d["time"].to_numpy()
     o, h, l, c = (d[col].to_numpy(dtype=float) for col in ("open", "high", "low", "close"))
+    atr_arr = d["atr"].to_numpy(dtype=float)
     if settings.spread_points is not None or "spread" not in d:
         spread = np.full(len(d), float(settings.spread_points or 0.0)) * spec.point
     else:
@@ -101,6 +104,10 @@ def run_backtest(
         balance += position.profit
         trades.append(position)
         position = None
+
+    def stop_reason(p: Trade) -> str:
+        moved = (p.sl > p.entry_price - p.initial_risk) if p.side is Signal.BUY else (p.sl < p.entry_price + p.initial_risk)
+        return "trailing stop" if moved else "stop loss"
 
     def exit_price_at(price_bid: float, k: int) -> float:
         # Closing a buy sells at bid; closing a sell buys at ask.
@@ -133,7 +140,7 @@ def run_backtest(
                     sl, tp = stop_levels(sig, entry, sig_atr, strategy)
                     volume = lot_size(balance, risk.risk_per_trade_pct, abs(entry - sl), spec)
                     if volume > 0:
-                        position = Trade(sig, volume, ts, entry, sl, tp)
+                        position = Trade(sig, volume, ts, entry, sl, tp, abs(entry - sl), entry)
 
         # 2) Stop loss / take profit inside this bar.
         if position is not None:
@@ -142,27 +149,33 @@ def run_backtest(
                 lo, hi, op = l[k], h[k], o[k]
                 if op <= p.sl:
                     close_position(k, op, "stop loss (gap)")
-                elif op >= p.tp:
+                elif p.tp and op >= p.tp:
                     close_position(k, op, "take profit (gap)")
                 elif lo <= p.sl:
-                    close_position(k, p.sl, "stop loss")
-                elif hi >= p.tp:
+                    close_position(k, p.sl, stop_reason(p))
+                elif p.tp and hi >= p.tp:
                     close_position(k, p.tp, "take profit")
             else:
                 s = spread[k]
                 lo, hi, op = l[k] + s, h[k] + s, o[k] + s  # ask prices
                 if op >= p.sl:
                     close_position(k, op, "stop loss (gap)")
-                elif op <= p.tp:
+                elif p.tp and op <= p.tp:
                     close_position(k, op, "take profit (gap)")
                 elif hi >= p.sl:
-                    close_position(k, p.sl, "stop loss")
-                elif lo <= p.tp:
+                    close_position(k, p.sl, stop_reason(p))
+                elif p.tp and lo <= p.tp:
                     close_position(k, p.tp, "take profit")
 
         # 2b) Weekend close at the end of the bar that spans the Friday close hour.
         if position is not None and hours.weekend_close_due(ts + bar_span - pd.Timedelta(seconds=1)):
             close_position(k, exit_price_at(c[k], k), "weekend close")
+
+        # 2c) Trail the stop using this closed bar; it applies from the next bar on.
+        if position is not None:
+            p = position
+            p.best = max(p.best, h[k]) if p.side is Signal.BUY else min(p.best, l[k])
+            p.sl = trailed_stop(p.side, p.entry_price, p.sl, p.initial_risk, p.best, atr_arr[k], strategy)
 
         # 3) Signal on this bar's close, executed at the next open.
         if k + 1 < len(d):

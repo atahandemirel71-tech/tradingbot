@@ -8,7 +8,8 @@ from bot.hours import TradingHours
 from bot.risk import RiskParams, SymbolSpec
 from bot.strategy import Signal, StrategyParams, generate_signal
 
-PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False)
+PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False,
+                        sl_atr_mult=1.5, tp_atr_mult=3.0, trailing_atr_mult=0, breakeven_at_r=0)
 SPEC = SymbolSpec(0.00001, 1.0, 0.01, 100.0, 0.01, point=0.00001, digits=5)
 RISK = RiskParams(risk_per_trade_pct=1.0, max_daily_loss_pct=0, max_total_loss_pct=0, max_spread_points=50)
 NO_SPREAD = BacktestSettings(initial_balance=10_000, spread_points=0)
@@ -149,7 +150,38 @@ def test_total_loss_limit_stops_trading():
 
 
 def test_adx_filter_reduces_trades():
-    with_adx = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, adx_min=30)
+    with_adx = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5,
+                              sl_atr_mult=1.5, tp_atr_mult=3.0, trailing_atr_mult=0, breakeven_at_r=0,
+                              use_adx_filter=True, adx_min=30)
     base = run_backtest(random_bars(), PARAMS, RISK, SPEC, NO_SPREAD)
     filtered = run_backtest(random_bars(), with_adx, RISK, SPEC, NO_SPREAD)
     assert 0 < len(filtered.trades) < len(base.trades)
+
+
+def test_trailing_stop_lets_winner_run_past_fixed_target():
+    close = series_until_buy()
+    entry_close = close[-1]
+    # Strong trend up, then a sharp reversal.
+    close = close + list(np.linspace(entry_close, entry_close + 0.06, 60)) + list(np.linspace(entry_close + 0.06, entry_close, 30))
+    trail = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False,
+                           sl_atr_mult=1.5, tp_atr_mult=0, trailing_atr_mult=3.0, breakeven_at_r=1.0)
+    fixed = run_backtest(bars(close), PARAMS, RISK, SPEC, NO_SPREAD).trades[0]
+    trailed = run_backtest(bars(close), trail, RISK, SPEC, NO_SPREAD).trades[0]
+    assert fixed.exit_reason == "take profit"
+    assert trailed.exit_reason in ("trailing stop", "opposite signal")
+    assert trailed.profit > fixed.profit * 2
+
+
+def test_breakeven_turns_loser_into_scratch():
+    close = series_until_buy()
+    e = close[-1]
+    # Goes up about 1.5 R, then collapses far below the original stop.
+    close = close + list(np.linspace(e, e + 0.004, 8)) + list(np.linspace(e + 0.004, e - 0.02, 10))
+    be = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False,
+                        sl_atr_mult=1.5, tp_atr_mult=0, trailing_atr_mult=0, breakeven_at_r=1.0)
+    no_be = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False,
+                           sl_atr_mult=1.5, tp_atr_mult=0, trailing_atr_mult=0, breakeven_at_r=0)
+    t_be = run_backtest(bars(close), be, RISK, SPEC, NO_SPREAD).trades[0]
+    t_no = run_backtest(bars(close), no_be, RISK, SPEC, NO_SPREAD).trades[0]
+    assert t_no.profit < -80
+    assert t_be.profit == pytest.approx(0.0, abs=1.0)
