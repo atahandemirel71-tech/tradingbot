@@ -11,7 +11,7 @@ class RiskParams:
     risk_per_trade_pct: float = 0.5      # % of balance lost if the stop loss is hit
     max_open_positions: int = 3          # across all symbols, bot positions only
     max_daily_loss_pct: float = 4.0      # stop trading after this equity drawdown in a day
-    max_total_loss_pct: float = 8.0      # stop trading for good below start balance minus this
+    max_total_loss_pct: float = 5.0      # stop trading for good below start balance minus this
     account_start_balance: float = 0.0   # reference for max_total_loss_pct; 0 = balance when first started
     close_on_limit: bool = True          # also close open positions when a loss limit is hit
     max_spread_points: int = 30          # skip entries when spread is wider than this

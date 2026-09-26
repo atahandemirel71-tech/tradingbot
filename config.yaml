@@ -46,7 +46,7 @@ risk:
   risk_per_trade_pct: 0.5     # % av saldot som riskeras per affär
   max_open_positions: 3       # totalt över alla symboler
   max_daily_loss_pct: 4.0     # dagsförlust (%) som stoppar handeln resten av dagen
-  max_total_loss_pct: 8.0     # total förlust (%) under startsaldot som stoppar boten helt
+  max_total_loss_pct: 5.0     # total förlust (%) under startsaldot som stoppar boten helt
   account_start_balance: 0    # startsaldo för totalgränsen, 0 = saldot när boten startade första gången
   close_on_limit: true        # stäng även öppna positioner när en förlustgräns nås
   max_spread_points: 30       # hoppa över affärer vid för stor spread

@@ -35,7 +35,7 @@ och klicka *Starta*. I testaren handlar EA:n alltid, oavsett `InpDryRun`.
 
 **Jämför förbättringarna:** under fliken *Ange parametrar* i testaren kan du slå av och på
 `InpUseADXFilter`, `InpCloseBeforeWeekend` och `InpUseSessionFilter` och se vad var och en gör.
-Sätt `InpMaxTotalLossPct = 0` om du vill se hela perioden utan att testet stoppas vid 8 % förlust.
+Sätt `InpMaxTotalLossPct = 0` om du vill se hela perioden utan att testet stoppas vid 5 % förlust.
 
 ## Hur den handlar
 
@@ -55,7 +55,7 @@ Riskskydd (anpassade för prop-firma-regler som FTMO: max 5 % dagsförlust, max 
 - **Positionsstorlek** räknas ut så att en träffad stop loss kostar max `risk_per_trade_pct` (0,5 %) av saldot.
 - **Max antal öppna positioner** (standard 3).
 - **Daglig förlustgräns**: tappar kontot 4 % under dagen stängs positionerna och ingen handel sker förrän nästa dag.
-- **Total förlustgräns**: faller kontot 8 % under startsaldot stängs allt och boten slutar handla helt.
+- **Total förlustgräns**: faller kontot 5 % under startsaldot stängs allt och boten slutar handla helt.
   Startsaldot sparas, så en omstart nollställer inte gränsen.
 - **Helgstängning**: alla positioner stängs fredag från kl. 20 (servertid), så att helggap inte kan ge
   förluster långt förbi stop loss.

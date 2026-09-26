@@ -6,7 +6,7 @@
 //|  Samma regler som Python-boten i detta projekt.                  |
 //+------------------------------------------------------------------+
 #property copyright "MT5 Trading Bot"
-#property version   "1.11"
+#property version   "1.12"
 
 #include <Trade/Trade.mqh>
 
@@ -33,7 +33,7 @@ input group "Risk"
 input double InpRiskPercent     = 0.5;   // % av saldot som riskeras per affar
 input int    InpMaxOpenPositions= 3;     // Max oppna positioner (alla symboler, denna EA)
 input double InpMaxDailyLossPct = 4.0;   // Dagsforlust (%) som stoppar handeln resten av dagen
-input double InpMaxTotalLossPct = 8.0;   // Total forlust (%) under startsaldot som stoppar EA:n helt
+input double InpMaxTotalLossPct = 5.0;   // Total forlust (%) under startsaldot som stoppar EA:n helt
 input double InpStartBalance    = 0.0;   // Startsaldo for totalgransen (0 = saldot vid forsta start)
 input bool   InpCloseOnLimit    = true;  // Stang aven oppna positioner nar en grans nas
 input int    InpMaxSpreadPoints = 30;    // Max spread i points
