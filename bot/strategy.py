@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Mapping
 
 import numpy as np
 import pandas as pd
@@ -95,7 +96,14 @@ def generate_signal(df: pd.DataFrame, p: StrategyParams) -> SignalResult:
         return SignalResult(Signal.NONE, float("nan"), float("nan"), f"need {p.min_bars} bars, got {len(df)}")
 
     d = add_indicators(df, p)
-    prev, last = d.iloc[-2], d.iloc[-1]
+    return evaluate(d.iloc[-2], d.iloc[-1], p)
+
+
+def evaluate(prev: Mapping, last: Mapping, p: StrategyParams) -> SignalResult:
+    """Decide on the bar ``last`` given the previous bar; both carry indicator columns.
+
+    Shared by the live bot and the backtester so both trade identically.
+    """
     close, last_atr, last_rsi = float(last["close"]), float(last["atr"]), float(last["rsi"])
 
     if not np.isfinite(last_atr) or last_atr <= 0 or not np.isfinite(last_rsi):

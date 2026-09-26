@@ -55,7 +55,53 @@ start_bot.bat
 eller `python run_bot.py`. Loggar skrivs till konsolen och till `logs/bot.log`.
 
 Börja med `dry_run: true` och läs loggen – du ser exakt vilka affärer den *skulle* ha gjort.
-När du är nöjd: sätt `dry_run: false` (fortfarande på demokonto först!).
+När du är nöjd (och backtesten ser bra ut): sätt `dry_run: false` (fortfarande på demokonto först!).
+
+## Backtest – testa strategin på historisk data
+
+Kör **alltid** en backtest innan du låter boten handla. Backtesten använder exakt samma
+signaler, stop loss/take profit och positionsstorlek som den riktiga boten, med inställningarna i `config.yaml`.
+
+**Direkt från MT5** (Windows, terminalen igång) – hämtar historik och symboldata från din broker:
+```bat
+python backtest.py --symbol EURUSD --from 2024-01-01 --to 2026-01-01
+python backtest.py --symbol GBPUSD --from 2024-01-01 --timeframe H1
+```
+
+**Från CSV-fil** (fungerar på alla datorer). I MT5: *Visa → Symboler → Staplar*, välj symbol och
+tidsram, klicka *Begär* och sedan *Exportera staplar*. Kör sedan:
+```bat
+python backtest.py --csv EURUSD_M15.csv
+python backtest.py --csv USDJPY_M15.csv --point 0.001 --tick-value 0.67
+```
+Generiska CSV-filer med kolumnerna `time,open,high,low,close` (valfritt `spread`) fungerar också.
+
+Exempel på resultat:
+```
+===== Backtest SYNTH_M15 =====
+Antal affärer    385
+Vinstandel       31.4 %
+Nettoresultat    -2,034.00
+Avkastning       -20.34 %
+Max drawdown     35.94 %
+Profit factor    0.92
+...
+```
+(siffrorna ovan är från slumpmässig testdata, inte riktiga kurser.)
+
+Alla affärer sparas i `backtest_results/trades.csv` och equity-kurvan i `backtest_results/equity.csv`
+(öppna i Excel för att göra en graf).
+
+Användbara flaggor: `--balance 5000`, `--spread 15` (points), `--commission 7` (per lot tur och retur),
+`--timeframe H1`.
+
+**Så tolkar du resultatet:**
+- **Profit factor** över ca 1,3 och en **max drawdown** du klarar av känslomässigt är ett minimum.
+- Testa flera symboler och tidsperioder. Om det bara fungerar på en period är det troligen tur.
+- Justera inte parametrar tills resultatet ser perfekt ut – det kallas *överoptimering* och
+  fungerar nästan aldrig framåt. Testa ändringar på en period och verifiera på en annan.
+- Backtesten är något försiktig: träffar en candle både SL och TP räknas det som förlust, och slippage
+  utöver spreaden simuleras inte. Varje symbol testas för sig, så gränsen `max_open_positions` gäller inte.
 
 ## Köra 24/7
 
@@ -86,3 +132,5 @@ Testerna använder en simulerad MT5-klient och kan köras på vilket operativsys
 | `bot/risk.py` | Positionsstorlek och daglig förlustgräns |
 | `bot/trader.py` | Huvudloopen som handlar |
 | `bot/mt5_client.py` | Kommunikation med MetaTrader 5 |
+| `backtest.py` | Backtest från MT5 eller CSV |
+| `bot/backtest.py` | Backtestmotorn |
