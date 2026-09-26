@@ -4,12 +4,13 @@ import pytest
 
 from backtest import load_csv
 from bot.backtest import BacktestSettings, run_backtest
+from bot.hours import TradingHours
 from bot.risk import RiskParams, SymbolSpec
 from bot.strategy import Signal, StrategyParams, generate_signal
 
-PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5)
+PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False)
 SPEC = SymbolSpec(0.00001, 1.0, 0.01, 100.0, 0.01, point=0.00001, digits=5)
-RISK = RiskParams(risk_per_trade_pct=1.0, max_daily_loss_pct=0, max_spread_points=50)
+RISK = RiskParams(risk_per_trade_pct=1.0, max_daily_loss_pct=0, max_total_loss_pct=0, max_spread_points=50)
 NO_SPREAD = BacktestSettings(initial_balance=10_000, spread_points=0)
 
 
@@ -114,3 +115,41 @@ def test_load_csv_generic(tmp_path):
     f.write_text("time,open,high,low,close\n2026-01-01 00:00,1,1.1,0.9,1.05\n")
     df = load_csv(str(f))
     assert df["time"].iloc[0] == pd.Timestamp("2026-01-01", tz="UTC")
+
+
+def random_bars(seed=7, n=3000):
+    rng = np.random.default_rng(seed)
+    return bars(1.1 + np.cumsum(rng.normal(0, 0.0008, n)))
+
+
+def test_no_position_held_over_weekend():
+    r = run_backtest(random_bars(), PARAMS, RISK, SPEC, BacktestSettings(10_000, spread_points=10))
+    assert any(t.exit_reason == "weekend close" for t in r.trades)
+    for t in r.trades:
+        # Opened and closed in the same trading week, never held through Saturday/Sunday.
+        assert t.entry_time.isocalendar()[:2] == t.exit_time.isocalendar()[:2]
+        assert t.entry_time.weekday() < 5 and t.exit_time.weekday() < 5
+        assert not (t.entry_time.weekday() == 4 and t.entry_time.hour >= 20)
+
+
+def test_session_filter_limits_entry_hours():
+    hours = TradingHours(close_before_weekend=False, use_session_filter=True, session_start_hour=8, session_end_hour=12)
+    r = run_backtest(random_bars(), PARAMS, RISK, SPEC, BacktestSettings(10_000, spread_points=10, hours=hours))
+    assert r.trades and all(8 <= t.entry_time.hour < 12 for t in r.trades)
+
+
+def test_total_loss_limit_stops_trading():
+    risk = RiskParams(risk_per_trade_pct=1.0, max_daily_loss_pct=0, max_total_loss_pct=3, max_spread_points=50)
+    unlimited = run_backtest(random_bars(1), PARAMS, RISK, SPEC, BacktestSettings(10_000, spread_points=20))
+    limited = run_backtest(random_bars(1), PARAMS, risk, SPEC, BacktestSettings(10_000, spread_points=20))
+    assert unlimited.stats["return_pct"] < -3  # fixture really loses more than the limit
+    assert len(limited.trades) < len(unlimited.trades)
+    # Stops close to the limit: at most about one trade's risk beyond it.
+    assert limited.stats["return_pct"] > -3 - 2.5
+
+
+def test_adx_filter_reduces_trades():
+    with_adx = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, adx_min=30)
+    base = run_backtest(random_bars(), PARAMS, RISK, SPEC, NO_SPREAD)
+    filtered = run_backtest(random_bars(), with_adx, RISK, SPEC, NO_SPREAD)
+    assert 0 < len(filtered.trades) < len(base.trades)

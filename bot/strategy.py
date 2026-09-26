@@ -1,4 +1,4 @@
-"""Signal generation: EMA crossover with RSI and trend filters, ATR-based stops.
+"""Signal generation: EMA crossover with RSI, trend and ADX filters, ATR-based stops.
 
 Everything here is pure pandas so it can be tested without MetaTrader 5.
 """
@@ -30,10 +30,15 @@ class StrategyParams:
     sl_atr_mult: float = 1.5
     tp_atr_mult: float = 3.0
     use_trend_filter: bool = True
+    use_adx_filter: bool = True
+    adx_period: int = 14
+    adx_min: float = 25.0   # only trade when ADX (trend strength) is at least this
 
     @property
     def min_bars(self) -> int:
         longest = max(self.fast_ema, self.slow_ema, self.rsi_period, self.atr_period)
+        if self.use_adx_filter:
+            longest = max(longest, self.adx_period * 2)
         if self.use_trend_filter:
             longest = max(longest, self.trend_ema)
         # Extra bars so the EMAs have warmed up.
@@ -72,6 +77,21 @@ def atr(df: pd.DataFrame, period: int) -> pd.Series:
     return true_range.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 
 
+def adx(df: pd.DataFrame, period: int) -> pd.Series:
+    """Wilder's ADX (same as MT5's iADXWilder)."""
+    up = df["high"].diff()
+    down = -df["low"].diff()
+    plus_dm = up.where((up > down) & (up > 0), 0.0)
+    minus_dm = down.where((down > up) & (down > 0), 0.0)
+    alpha = 1.0 / period
+    atr_w = atr(df, period)
+    plus_di = 100.0 * plus_dm.ewm(alpha=alpha, adjust=False, min_periods=period).mean() / atr_w
+    minus_di = 100.0 * minus_dm.ewm(alpha=alpha, adjust=False, min_periods=period).mean() / atr_w
+    di_sum = (plus_di + minus_di).replace(0.0, np.nan)
+    dx = 100.0 * (plus_di - minus_di).abs() / di_sum
+    return dx.ewm(alpha=alpha, adjust=False, min_periods=period).mean()
+
+
 def add_indicators(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
     out = df.copy()
     out["ema_fast"] = ema(out["close"], p.fast_ema)
@@ -79,6 +99,7 @@ def add_indicators(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
     out["ema_trend"] = ema(out["close"], p.trend_ema)
     out["rsi"] = rsi(out["close"], p.rsi_period)
     out["atr"] = atr(out, p.atr_period)
+    out["adx"] = adx(out, p.adx_period)
     return out
 
 
@@ -111,6 +132,11 @@ def evaluate(prev: Mapping, last: Mapping, p: StrategyParams) -> SignalResult:
 
     crossed_up = prev["ema_fast"] <= prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]
     crossed_down = prev["ema_fast"] >= prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]
+
+    if (crossed_up or crossed_down) and p.use_adx_filter:
+        last_adx = float(last["adx"])
+        if not np.isfinite(last_adx) or last_adx < p.adx_min:
+            return SignalResult(Signal.NONE, last_atr, close, f"EMA cross but ADX {last_adx:.1f} < {p.adx_min:g} (no trend)")
 
     if crossed_up:
         if p.use_trend_filter and close <= last["ema_trend"]:

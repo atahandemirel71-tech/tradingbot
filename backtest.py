@@ -109,7 +109,7 @@ def main() -> int:
     if len(bars) < cfg.strategy.min_bars + 10:
         sys.exit(f"För lite data: {len(bars)} candles, behöver minst {cfg.strategy.min_bars + 10}.")
 
-    settings = BacktestSettings(args.balance, spread, args.commission, cfg.close_on_opposite_signal)
+    settings = BacktestSettings(args.balance, spread, args.commission, cfg.close_on_opposite_signal, cfg.hours)
     result = run_backtest(bars, cfg.strategy, cfg.risk, spec, settings)
     print(format_report(result.stats, title))
 

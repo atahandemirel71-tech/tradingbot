@@ -7,6 +7,10 @@ Assumptions (kept deliberately conservative):
   live bot which trades right after a bar closes.
 - If a bar touches both SL and TP, the stop loss is assumed to be hit first.
 - If price gaps past SL/TP, the fill is at the bar's open.
+- Weekend close: positions are closed at the close of the bar that spans the
+  Friday close hour. Loss limits are checked at each bar's open, so a limit
+  crossed inside a bar is acted on one bar late.
+- Bar times are taken as broker server time (as MT5 exports them).
 """
 from __future__ import annotations
 
@@ -15,7 +19,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .risk import DailyLossGuard, RiskParams, SymbolSpec, lot_size
+from .hours import TradingHours
+from .risk import DailyLossGuard, RiskParams, SymbolSpec, TotalLossGuard, lot_size
 from .strategy import Signal, StrategyParams, add_indicators, evaluate, stop_levels
 
 
@@ -25,6 +30,7 @@ class BacktestSettings:
     spread_points: float | None = None     # None -> use the data's 'spread' column
     commission_per_lot: float = 0.0        # round-trip, in account currency
     close_on_opposite_signal: bool = True
+    hours: TradingHours = TradingHours()
 
 
 @dataclass
@@ -76,6 +82,11 @@ def run_backtest(
 
     balance = settings.initial_balance
     guard = DailyLossGuard(risk.max_daily_loss_pct)
+    total_guard = TotalLossGuard(risk.max_total_loss_pct, risk.account_start_balance or settings.initial_balance)
+    hours = settings.hours
+    halted = False
+    diffs = d["time"].diff().dropna()
+    bar_span = diffs.median() if len(diffs) else pd.Timedelta(hours=1)
     trades: list[Trade] = []
     position: Trade | None = None
     pending: tuple[Signal, float] | None = None  # (signal, atr) to act on at next open
@@ -101,13 +112,22 @@ def run_backtest(
         open_equity = balance + (_pnl(position, exit_price_at(o[k], k), spec) if position else 0.0)
         guard.update(ts.date(), open_equity)
 
+        # 0) Loss limits, checked at the open.
+        if not halted and total_guard.breached(open_equity):
+            halted = True
+            if position is not None:
+                close_position(k, exit_price_at(o[k], k), "total loss limit")
+        daily_ok = guard.trading_allowed(open_equity)
+        if not daily_ok and position is not None and risk.close_on_limit:
+            close_position(k, exit_price_at(o[k], k), "daily loss limit")
+
         # 1) Act on the previous bar's signal at this bar's open.
         if pending is not None:
             sig, sig_atr = pending
             pending = None
             if position is not None and position.side is not sig and settings.close_on_opposite_signal:
                 close_position(k, exit_price_at(o[k], k), "opposite signal")
-            if position is None and guard.trading_allowed(open_equity):
+            if position is None and not halted and daily_ok and hours.entries_allowed(ts):
                 if spread[k] / spec.point <= risk.max_spread_points:
                     entry = o[k] + spread[k] if sig is Signal.BUY else o[k]
                     sl, tp = stop_levels(sig, entry, sig_atr, strategy)
@@ -139,6 +159,10 @@ def run_backtest(
                     close_position(k, p.sl, "stop loss")
                 elif lo <= p.tp:
                     close_position(k, p.tp, "take profit")
+
+        # 2b) Weekend close at the end of the bar that spans the Friday close hour.
+        if position is not None and hours.weekend_close_due(ts + bar_span - pd.Timedelta(seconds=1)):
+            close_position(k, exit_price_at(c[k], k), "weekend close")
 
         # 3) Signal on this bar's close, executed at the next open.
         if k + 1 < len(d):

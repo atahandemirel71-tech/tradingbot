@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bot.strategy import Signal, StrategyParams, generate_signal, rsi, stop_levels
+from bot.strategy import Signal, StrategyParams, adx, generate_signal, rsi, stop_levels
 
 
 def bars_from_close(close):
@@ -16,7 +16,7 @@ def bars_from_close(close):
     })
 
 
-PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5)
+PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False)
 
 
 def test_not_enough_bars():
@@ -70,3 +70,22 @@ def test_stop_levels():
     p = StrategyParams(sl_atr_mult=1.5, tp_atr_mult=3.0)
     assert stop_levels(Signal.BUY, 1.1, 0.001, p) == pytest.approx((1.0985, 1.103))
     assert stop_levels(Signal.SELL, 1.1, 0.001, p) == pytest.approx((1.1015, 1.097))
+
+
+def test_adx_high_in_trend_low_in_range():
+    trend = bars_from_close(np.linspace(1.0, 1.2, 200))
+    rng = np.random.default_rng(0)
+    ranging = bars_from_close(1.1 + rng.normal(0, 0.0003, 200))
+    assert adx(trend, 14).iloc[-1] > 40
+    assert adx(ranging, 14).iloc[-1] < 25
+
+
+def test_adx_filter_blocks_cross_without_trend():
+    close = list(np.linspace(1.00, 1.10, 80)) + list(np.linspace(1.10, 1.095, 6))
+    strict = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, adx_min=99)
+    results = []
+    for extra in np.linspace(1.096, 1.12, 10):
+        close.append(extra)
+        results.append(generate_signal(bars_from_close(close), strict))
+    assert all(r.signal is Signal.NONE for r in results)
+    assert any("ADX" in r.reason for r in results)

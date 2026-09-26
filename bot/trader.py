@@ -1,14 +1,16 @@
 """The 24/7 trading loop: reconnects, reads closed bars, and trades on signals."""
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 
 from .config import BotConfig
-from .risk import DailyLossGuard, lot_size
+from .risk import DailyLossGuard, TotalLossGuard, lot_size
 from .strategy import Signal, generate_signal, stop_levels
 
 log = logging.getLogger(__name__)
@@ -19,8 +21,11 @@ class Trader:
         self.cfg = cfg
         self.client = client
         self.guard = DailyLossGuard(cfg.risk.max_daily_loss_pct)
+        self.total_guard: TotalLossGuard | None = None
         self._last_bar: dict[str, pd.Timestamp] = {}
         self._guard_warned = False
+        self._halted = False
+        self._weekend_logged = False
         self._running = False
 
     # ---------- lifecycle ----------
@@ -49,20 +54,93 @@ class Trader:
 
     # ---------- one iteration ----------
     def tick(self, now: datetime | None = None) -> None:
-        now = now or datetime.now(timezone.utc)
+        """One iteration. ``now`` is broker server time (as shown in MT5)."""
+        now = now or self._server_time()
         account = self.client.account()
         if account is None:
             log.warning("No account info this tick")
             return
         self.guard.update(now.date(), account.equity)
+        if self.total_guard is None:
+            self.total_guard = TotalLossGuard(self.cfg.risk.max_total_loss_pct,
+                                              self._start_balance(account))
+
+        if not self._check_limits(account, now):
+            return
 
         for symbol in self.cfg.symbols:
             try:
-                self._process_symbol(symbol, account)
+                self._process_symbol(symbol, account, now)
             except Exception:
                 log.exception("%s: error while processing", symbol)
 
-    def _process_symbol(self, symbol: str, account) -> None:
+    def _server_time(self) -> datetime:
+        getter = getattr(self.client, "server_time", None)
+        t = getter(self.cfg.symbols[0]) if getter else None
+        return t or datetime.now(timezone.utc)
+
+    def _start_balance(self, account) -> float:
+        """Reference balance for the total loss limit; remembered across restarts."""
+        r = self.cfg.risk
+        if r.account_start_balance > 0:
+            return r.account_start_balance
+        path = Path(self.cfg.state_file)
+        key = str(account.login)
+        state = {}
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        if key not in state:
+            state[key] = {"start_balance": account.balance}
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            except OSError:
+                log.warning("Could not save %s", path)
+        start = float(state[key]["start_balance"])
+        log.info("Total loss limit: start balance %.2f, trading stops at equity %.2f",
+                 start, start * (1 - r.max_total_loss_pct / 100))
+        return start
+
+    def _check_limits(self, account, now: datetime) -> bool:
+        """Enforce loss limits and the weekend close. Returns False when nothing else should run."""
+        r = self.cfg.risk
+        if self._halted:
+            return False
+        if self.total_guard.breached(account.equity):
+            log.error("TOTAL LOSS LIMIT %.1f%% hit (equity %.2f <= %.2f). Closing everything and "
+                      "stopping trading for good. Set a new account_start_balance to resume.",
+                      r.max_total_loss_pct, account.equity, self.total_guard.floor)
+            self._close_all("total loss limit")
+            self._halted = True
+            return False
+        if not self.guard.trading_allowed(account.equity):
+            if not self._guard_warned:
+                log.warning("Daily loss limit of %.1f%% reached (start equity %.2f, now %.2f); "
+                            "no new trades until tomorrow", r.max_daily_loss_pct,
+                            self.guard.start_equity, account.equity)
+                self._guard_warned = True
+                if r.close_on_limit:
+                    self._close_all("daily loss limit")
+            return False
+        self._guard_warned = False
+        if self.cfg.hours.weekend_close_due(now):
+            first = not self._weekend_logged
+            if first:
+                log.info("Weekend close: closing bot positions, no new trades until the market reopens")
+                self._weekend_logged = True
+            if first or not self.cfg.dry_run:  # in dry run positions stay open; log them only once
+                self._close_all("weekend close")
+            return False
+        self._weekend_logged = False
+        return True
+
+    def _close_all(self, reason: str) -> None:
+        for pos in self.client.positions(self.cfg.magic_number):
+            self._close(pos, reason)
+
+    def _process_symbol(self, symbol: str, account, now: datetime) -> None:
         p = self.cfg.strategy
         bars = self.client.closed_bars(symbol, self.cfg.timeframe, p.min_bars + 50)
         if bars is None or bars.empty:
@@ -92,13 +170,16 @@ class Trader:
                 log.info("%s: opposite position open and close_on_opposite_signal is off", symbol)
                 return
             for pos in opposite:
-                self._close(pos)
+                self._close(pos, "opposite signal")
             positions = self.client.positions(self.cfg.magic_number) if not self.cfg.dry_run else \
                 [pos for pos in positions if pos not in opposite]
             if any(pos.symbol == symbol for pos in positions):
                 log.warning("%s: could not close opposite position; not opening a new one", symbol)
                 return
 
+        if not self.cfg.hours.entries_allowed(now):
+            log.info("%s: outside trading hours (%s server time), no new trade", symbol, now.strftime("%a %H:%M"))
+            return
         self._open(symbol, result, account, len(positions))
 
     # ---------- actions ----------
@@ -107,14 +188,6 @@ class Trader:
         if not account.trade_allowed and not self.cfg.dry_run:
             log.warning("%s: trading not allowed on account/terminal (enable Algo Trading)", symbol)
             return
-        if not self.guard.trading_allowed(account.equity):
-            if not self._guard_warned:
-                log.warning("Daily loss limit of %.1f%% reached (start equity %.2f, now %.2f); "
-                            "no new trades until tomorrow (UTC)", r.max_daily_loss_pct,
-                            self.guard.start_equity, account.equity)
-                self._guard_warned = True
-            return
-        self._guard_warned = False
         if open_count >= r.max_open_positions:
             log.info("%s: max open positions (%d) reached", symbol, r.max_open_positions)
             return
@@ -155,9 +228,9 @@ class Trader:
         self.client.open_position(symbol, result.signal, volume, sl, tp, self.cfg.magic_number,
                                   self.cfg.deviation_points, comment="mt5bot")
 
-    def _close(self, pos) -> None:
-        log.info("%s: CLOSE %s #%s %.2f lots (profit %.2f) on opposite signal", pos.symbol,
-                 pos.side.value, pos.ticket, pos.volume, pos.profit)
+    def _close(self, pos, reason: str) -> None:
+        log.info("%s: CLOSE %s #%s %.2f lots (profit %.2f): %s", pos.symbol,
+                 pos.side.value, pos.ticket, pos.volume, pos.profit, reason)
         if self.cfg.dry_run:
             log.info("%s: dry_run=true, close NOT sent", pos.symbol)
             return

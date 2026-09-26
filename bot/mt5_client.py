@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -138,6 +139,13 @@ class MT5Client:
         if t is None or t.bid <= 0 or t.ask <= 0:
             return None
         return float(t.bid), float(t.ask)
+
+    def server_time(self, symbol: str) -> datetime | None:
+        """Broker server wall-clock time of the latest tick (MT5 reports it as a UTC-like timestamp)."""
+        t = self.mt5.symbol_info_tick(symbol)
+        if t is None or not t.time:
+            return None
+        return datetime.fromtimestamp(t.time, tz=timezone.utc)
 
     def positions(self, magic: int) -> list[Position]:
         raw = self.mt5.positions_get()

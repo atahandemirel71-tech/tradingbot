@@ -1,11 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                               MT5TradingBot.mq5  |
-//|  Trendfoljande Expert Advisor: EMA-kors + RSI + EMA 200-filter,  |
-//|  ATR-baserad SL/TP, riskbaserad lotstorlek och daglig forlust-   |
-//|  grans. Samma regler som Python-boten i detta projekt.           |
+//|  Trendfoljande Expert Advisor: EMA-kors + RSI + EMA 200 + ADX,   |
+//|  ATR-baserad SL/TP, riskbaserad lotstorlek, dags- och total-     |
+//|  forlustgrans (prop-firma), helgstangning och tidsfilter.        |
+//|  Samma regler som Python-boten i detta projekt.                  |
 //+------------------------------------------------------------------+
 #property copyright "MT5 Trading Bot"
-#property version   "1.00"
+#property version   "1.10"
 
 #include <Trade/Trade.mqh>
 
@@ -22,14 +23,28 @@ input double          InpRSIOversold   = 30.0;           // Inga salj under denn
 input int             InpATRPeriod     = 14;             // ATR-period
 input double          InpSLATRMult     = 1.5;            // Stop loss = X * ATR
 input double          InpTPATRMult     = 3.0;            // Take profit = X * ATR
+input bool            InpUseADXFilter  = true;           // Handla bara nar det finns en trend (ADX)
+input int             InpADXPeriod     = 14;             // ADX-period
+input double          InpADXMin        = 25.0;           // Minsta ADX for att handla
 input bool            InpCloseOnOpposite = true;         // Stang och vand vid motsatt signal
 
 //--- Risk
 input group "Risk"
-input double InpRiskPercent     = 1.0;   // % av saldot som riskeras per affar
+input double InpRiskPercent     = 0.5;   // % av saldot som riskeras per affar
 input int    InpMaxOpenPositions= 3;     // Max oppna positioner (alla symboler, denna EA)
-input double InpMaxDailyLossPct = 5.0;   // Pausa nya affarer efter sa har stor dagsforlust (%)
+input double InpMaxDailyLossPct = 4.0;   // Dagsforlust (%) som stoppar handeln resten av dagen
+input double InpMaxTotalLossPct = 8.0;   // Total forlust (%) under startsaldot som stoppar EA:n helt
+input double InpStartBalance    = 0.0;   // Startsaldo for totalgransen (0 = saldot vid forsta start)
+input bool   InpCloseOnLimit    = true;  // Stang aven oppna positioner nar en grans nas
 input int    InpMaxSpreadPoints = 30;    // Max spread i points
+
+//--- Tider (brokerns SERVERTID, klockan i MT5)
+input group "Tider (servertid)"
+input bool   InpCloseBeforeWeekend = true;  // Stang alla positioner fredag kvall
+input int    InpFridayCloseHour    = 20;    // Fran denna timme pa fredagar
+input bool   InpUseSessionFilter   = false; // Oppna bara nya affarer mellan tiderna nedan (ej D1)
+input int    InpSessionStartHour   = 8;     // Starttimme
+input int    InpSessionEndHour     = 20;    // Sluttimme (exklusive)
 
 //--- Ovrigt
 input group "Ovrigt"
@@ -39,11 +54,14 @@ input int    InpDeviationPoints = 20;        // Max slippage i points
 
 CTrade   trade;
 int      hFast = INVALID_HANDLE, hSlow = INVALID_HANDLE, hTrend = INVALID_HANDLE;
-int      hRSI = INVALID_HANDLE, hATR = INVALID_HANDLE;
+int      hRSI = INVALID_HANDLE, hATR = INVALID_HANDLE, hADX = INVALID_HANDLE;
 datetime lastBarTime = 0;
-int      dayOfYear = -1;
 double   dayStartEquity = 0.0;
+double   localDayId = -1;
+double   startBalance = 0.0;
 bool     guardWarned = false;
+bool     halted = false;
+bool     weekendLogged = false;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -54,19 +72,36 @@ int OnInit()
      { Print("Fel: risk per affar maste vara mellan 0 och 5 %"); return INIT_PARAMETERS_INCORRECT; }
    if(InpSLATRMult <= 0 || InpTPATRMult <= 0)
      { Print("Fel: ATR-multiplarna maste vara positiva"); return INIT_PARAMETERS_INCORRECT; }
+   if(InpFridayCloseHour < 0 || InpFridayCloseHour > 23 || InpSessionStartHour < 0 ||
+      InpSessionStartHour > 23 || InpSessionEndHour < 0 || InpSessionEndHour > 23)
+     { Print("Fel: timmar maste vara 0-23"); return INIT_PARAMETERS_INCORRECT; }
 
    hFast  = iMA(_Symbol, InpTimeframe, InpFastEMA, 0, MODE_EMA, PRICE_CLOSE);
    hSlow  = iMA(_Symbol, InpTimeframe, InpSlowEMA, 0, MODE_EMA, PRICE_CLOSE);
    hTrend = iMA(_Symbol, InpTimeframe, InpTrendEMA, 0, MODE_EMA, PRICE_CLOSE);
    hRSI   = iRSI(_Symbol, InpTimeframe, InpRSIPeriod, PRICE_CLOSE);
    hATR   = iATR(_Symbol, InpTimeframe, InpATRPeriod);
+   hADX   = iADXWilder(_Symbol, InpTimeframe, InpADXPeriod);
    if(hFast == INVALID_HANDLE || hSlow == INVALID_HANDLE || hTrend == INVALID_HANDLE ||
-      hRSI == INVALID_HANDLE || hATR == INVALID_HANDLE)
+      hRSI == INVALID_HANDLE || hATR == INVALID_HANDLE || hADX == INVALID_HANDLE)
      { Print("Kunde inte skapa indikatorer: ", GetLastError()); return INIT_FAILED; }
 
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviationPoints);
    trade.SetTypeFillingBySymbol(_Symbol);
+
+   // Startsaldo for totalgransen sparas i en global variabel sa det overlever omstarter.
+   if(InpStartBalance > 0)
+      startBalance = InpStartBalance;
+   else
+     {
+      if(!GlobalVariableCheck(GvName("start")))
+         GlobalVariableSet(GvName("start"), AccountInfoDouble(ACCOUNT_BALANCE));
+      startBalance = GlobalVariableGet(GvName("start"));
+     }
+   if(InpMaxTotalLossPct > 0)
+      PrintFormat("Totalgrans: startsaldo %.2f, EA:n stoppar vid equity %.2f", startBalance,
+                  startBalance * (1.0 - InpMaxTotalLossPct / 100.0));
 
    PrintFormat("MT5TradingBot startad pa %s %s - %s", _Symbol, EnumToString(Timeframe()),
                IsDryRun() ? "DRY RUN (inga riktiga order)" : "LIVE-HANDEL");
@@ -83,6 +118,7 @@ void OnDeinit(const int reason)
    IndicatorRelease(hTrend);
    IndicatorRelease(hRSI);
    IndicatorRelease(hATR);
+   IndicatorRelease(hADX);
   }
 
 //+------------------------------------------------------------------+
@@ -101,6 +137,8 @@ bool IsDryRun()
 void OnTick()
   {
    UpdateDailyGuard();
+   if(!CheckLimits())
+      return;
 
    datetime barTime = iTime(_Symbol, Timeframe(), 0);
    if(barTime == 0 || barTime == lastBarTime)
@@ -122,15 +160,16 @@ void OnTick()
 //+------------------------------------------------------------------+
 bool EvaluateSignal(int &signal, double &atr)
   {
-   double fast[], slow[], trend[], rsi[], atrBuf[];
+   double fast[], slow[], trend[], rsi[], atrBuf[], adxBuf[];
    ArraySetAsSeries(fast, true);
    ArraySetAsSeries(slow, true);
    ArraySetAsSeries(trend, true);
    ArraySetAsSeries(rsi, true);
    ArraySetAsSeries(atrBuf, true);
+   ArraySetAsSeries(adxBuf, true);
    if(CopyBuffer(hFast, 0, 1, 2, fast) != 2 || CopyBuffer(hSlow, 0, 1, 2, slow) != 2 ||
       CopyBuffer(hTrend, 0, 1, 1, trend) != 1 || CopyBuffer(hRSI, 0, 1, 1, rsi) != 1 ||
-      CopyBuffer(hATR, 0, 1, 1, atrBuf) != 1)
+      CopyBuffer(hATR, 0, 1, 1, atrBuf) != 1 || CopyBuffer(hADX, 0, 1, 1, adxBuf) != 1)
       return false;
    if(Bars(_Symbol, Timeframe()) < InpTrendEMA + 5)
       return false;
@@ -143,6 +182,12 @@ bool EvaluateSignal(int &signal, double &atr)
 
    bool crossedUp   = fast[1] <= slow[1] && fast[0] > slow[0];
    bool crossedDown = fast[1] >= slow[1] && fast[0] < slow[0];
+
+   if((crossedUp || crossedDown) && InpUseADXFilter && adxBuf[0] < InpADXMin)
+     {
+      PrintFormat("%s: EMA-kors men ADX %.1f < %.1f (ingen trend) - ingen affar", _Symbol, adxBuf[0], InpADXMin);
+      return true;
+     }
 
    if(crossedUp)
      {
@@ -204,9 +249,8 @@ void HandleSignal(int signal, double atr)
 //+------------------------------------------------------------------+
 void OpenPosition(int signal, double atr)
   {
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   if(!DailyGuardAllows(equity))
-      return;
+   if(!EntriesAllowed(TimeCurrent()))
+     { PrintFormat("%s: utanfor handelstiderna - ingen ny affar", _Symbol); return; }
    if(CountMyPositions() >= InpMaxOpenPositions)
      { PrintFormat("%s: max antal oppna positioner (%d) natt", _Symbol, InpMaxOpenPositions); return; }
    if(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) != SYMBOL_TRADE_MODE_FULL)
@@ -288,31 +332,123 @@ int CountMyPositions()
   }
 
 //+------------------------------------------------------------------+
+//| Globala variabler delas av alla diagram med samma konto + magic. |
+//+------------------------------------------------------------------+
+string GvName(string suffix)
+  {
+   return StringFormat("MT5TB_%I64d_%I64d_%s", AccountInfoInteger(ACCOUNT_LOGIN), InpMagicNumber, suffix);
+  }
+
 void UpdateDailyGuard()
   {
    MqlDateTime now;
    TimeToStruct(TimeCurrent(), now);
-   if(now.day_of_year != dayOfYear)
+   double dayId = now.year * 1000 + now.day_of_year;
+   if(!GlobalVariableCheck(GvName("day")) || GlobalVariableGet(GvName("day")) != dayId)
      {
-      dayOfYear = now.day_of_year;
-      dayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+      GlobalVariableSet(GvName("day"), dayId);
+      GlobalVariableSet(GvName("dayeq"), AccountInfoDouble(ACCOUNT_EQUITY));
+     }
+   if(dayId != localDayId)
+     {
+      localDayId = dayId;
       guardWarned = false;
      }
+   dayStartEquity = GlobalVariableGet(GvName("dayeq"));
   }
 
-bool DailyGuardAllows(double equity)
+//+------------------------------------------------------------------+
+//| Forlustgranser och helgstangning. false = gor inget mer nu.      |
+//+------------------------------------------------------------------+
+bool CheckLimits()
   {
-   if(InpMaxDailyLossPct <= 0 || dayStartEquity <= 0)
-      return true;
-   double drawdownPct = (dayStartEquity - equity) / dayStartEquity * 100.0;
-   if(drawdownPct < InpMaxDailyLossPct)
-      return true;
-   if(!guardWarned)
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   if(halted || (InpMaxTotalLossPct > 0 && startBalance > 0 &&
+                 equity <= startBalance * (1.0 - InpMaxTotalLossPct / 100.0)))
      {
-      PrintFormat("Daglig forlustgrans %.1f %% nadd (start %.2f, nu %.2f) - inga nya affarer idag",
-                  InpMaxDailyLossPct, dayStartEquity, equity);
-      guardWarned = true;
+      if(!halted)
+        {
+         PrintFormat("TOTAL FORLUSTGRANS %.1f %% NADD (equity %.2f). Stanger allt och stoppar EA:n. "
+                     "Ange nytt InpStartBalance for att fortsatta.", InpMaxTotalLossPct, equity);
+         halted = true;
+         CloseAllMine(true, "totalgrans", true);
+        }
+      return false;
      }
-   return false;
+
+   if(InpMaxDailyLossPct > 0 && dayStartEquity > 0 &&
+      (dayStartEquity - equity) / dayStartEquity * 100.0 >= InpMaxDailyLossPct)
+     {
+      if(!guardWarned)
+        {
+         PrintFormat("Daglig forlustgrans %.1f %% nadd (start %.2f, nu %.2f) - ingen handel resten av dagen",
+                     InpMaxDailyLossPct, dayStartEquity, equity);
+         guardWarned = true;
+         if(InpCloseOnLimit)
+            CloseAllMine(true, "daglig grans", true);
+        }
+      return false;
+     }
+
+   if(WeekendCloseDue(TimeCurrent()))
+     {
+      if(!IsDryRun() || !weekendLogged)
+         CloseAllMine(false, "helgstangning", !weekendLogged);
+      if(!weekendLogged)
+         PrintFormat("%s: helgstangning - inga nya affarer forran marknaden oppnar igen", _Symbol);
+      weekendLogged = true;
+      return false;
+     }
+   weekendLogged = false;
+   return true;
+  }
+
+bool WeekendCloseDue(datetime t)
+  {
+   if(!InpCloseBeforeWeekend)
+      return false;
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   return d.day_of_week == 6 || d.day_of_week == 0 || (d.day_of_week == 5 && d.hour >= InpFridayCloseHour);
+  }
+
+bool EntriesAllowed(datetime t)
+  {
+   if(WeekendCloseDue(t))
+      return false;
+   if(!InpUseSessionFilter)
+      return true;
+   MqlDateTime d;
+   TimeToStruct(t, d);
+   if(InpSessionStartHour <= InpSessionEndHour)
+      return d.hour >= InpSessionStartHour && d.hour < InpSessionEndHour;
+   return d.hour >= InpSessionStartHour || d.hour < InpSessionEndHour;
+  }
+
+//+------------------------------------------------------------------+
+//| Stanger EA:ns positioner (alla symboler eller bara denna).       |
+//+------------------------------------------------------------------+
+void CloseAllMine(bool allSymbols, string reason, bool verbose)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+      string sym = PositionGetString(POSITION_SYMBOL);
+      if(!allSymbols && sym != _Symbol)
+         continue;
+      if(verbose || !IsDryRun())
+         PrintFormat("%s: STANGER #%I64u (vinst %.2f): %s", sym, ticket, PositionGetDouble(POSITION_PROFIT), reason);
+      if(IsDryRun())
+        {
+         if(verbose)
+            Print("DRY RUN: stangning skickades inte");
+         continue;
+        }
+      if(!trade.PositionClose(ticket))
+         PrintFormat("Kunde inte stanga #%I64u: %s", ticket, trade.ResultRetcodeDescription());
+     }
   }
 //+------------------------------------------------------------------+

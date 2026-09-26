@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from .hours import TradingHours
 from .risk import RiskParams
 from .strategy import StrategyParams
 
@@ -32,6 +33,8 @@ class BotConfig:
     close_on_opposite_signal: bool = True
     deviation_points: int = 20
     log_file: str = "logs/bot.log"
+    state_file: str = "logs/state.json"
+    hours: TradingHours = field(default_factory=TradingHours)
     strategy: StrategyParams = field(default_factory=StrategyParams)
     risk: RiskParams = field(default_factory=RiskParams)
     credentials: Credentials = field(default_factory=Credentials)
@@ -54,9 +57,11 @@ def load_config(path: str | Path = "config.yaml") -> BotConfig:
 
     strategy = _build(StrategyParams, raw.pop("strategy", None))
     risk = _build(RiskParams, raw.pop("risk", None))
+    hours = _build(TradingHours, raw.pop("hours", None))
     cfg = _build(BotConfig, raw)
     cfg.strategy = strategy
     cfg.risk = risk
+    cfg.hours = hours
     cfg.credentials = _load_credentials(path.parent)
     _validate(cfg)
     return cfg
@@ -93,5 +98,10 @@ def _validate(cfg: BotConfig) -> None:
         raise ValueError("config: risk.risk_per_trade_pct must be between 0 and 5")
     if r.max_open_positions < 1:
         raise ValueError("config: risk.max_open_positions must be at least 1")
+    if r.max_total_loss_pct < 0 or r.max_daily_loss_pct < 0:
+        raise ValueError("config: loss limits cannot be negative")
+    if s.use_adx_filter and s.adx_min <= 0:
+        raise ValueError("config: strategy.adx_min must be positive")
+    cfg.hours.validate()
     if cfg.poll_seconds < 1:
         raise ValueError("config: poll_seconds must be at least 1")

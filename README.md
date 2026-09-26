@@ -25,13 +25,17 @@ Vill du ha boten **inne i MT5** använder du `mql5/MT5TradingBot.mq5` – samma 
 2. Gå till `MQL5\Experts` och kopiera in `MT5TradingBot.mq5`.
 3. Tryck **F4** (öppnar MetaEditor), öppna filen och tryck **F7** (Kompilera). Det ska stå `0 errors`.
 4. Tillbaka i MT5: högerklicka *Expert Advisors* i Navigator (Ctrl+N) → *Uppdatera*. `MT5TradingBot` syns nu.
-5. Öppna ett diagram (t.ex. EURUSD, M15) och dra EA:n till diagrammet. Bocka i **Allow Algo Trading**
+5. Öppna ett diagram (t.ex. EURUSD, H1) och dra EA:n till diagrammet. Bocka i **Allow Algo Trading**
    och slå på knappen **Algo Trading** i verktygsfältet.
 6. `InpDryRun = true` betyder att den bara loggar (fliken *Experter*). Sätt `false` för att handla på riktigt.
    Dra EA:n till ett diagram per symbol du vill handla.
 
 **Backtest i MT5:** tryck *Ctrl+R* (Strategitestare), välj `MT5TradingBot`, symbol, tidsram och period
 och klicka *Starta*. I testaren handlar EA:n alltid, oavsett `InpDryRun`.
+
+**Jämför förbättringarna:** under fliken *Ange parametrar* i testaren kan du slå av och på
+`InpUseADXFilter`, `InpCloseBeforeWeekend` och `InpUseSessionFilter` och se vad var och en gör.
+Sätt `InpMaxTotalLossPct = 0` om du vill se hela perioden utan att testet stoppas vid 8 % förlust.
 
 ## Hur den handlar
 
@@ -42,14 +46,21 @@ Strategi (trendföljande) på stängda candles, per symbol:
 | EMA-kors | EMA 9 korsar **upp** över EMA 21 | EMA 9 korsar **ned** under EMA 21 |
 | Trendfilter | Pris över EMA 200 | Pris under EMA 200 |
 | RSI-filter | RSI under 70 | RSI över 30 |
+| ADX-filter | ADX minst 25 (det finns en trend) | ADX minst 25 |
 
 - **Stop loss** = 1,5 × ATR, **Take profit** = 3,0 × ATR (varje affär har alltid SL/TP hos brokern).
 - Vid motsatt signal stängs positionen och vänds.
 
-Riskskydd:
-- **Positionsstorlek** räknas ut så att en träffad stop loss kostar max `risk_per_trade_pct` (1 %) av saldot.
+Riskskydd (anpassade för prop-firma-regler som FTMO: max 5 % dagsförlust, max 10 % total förlust):
+- **Positionsstorlek** räknas ut så att en träffad stop loss kostar max `risk_per_trade_pct` (0,5 %) av saldot.
 - **Max antal öppna positioner** (standard 3).
-- **Daglig förlustgräns**: tappar kontot 5 % under dagen pausas nya affärer till nästa dag (UTC).
+- **Daglig förlustgräns**: tappar kontot 4 % under dagen stängs positionerna och ingen handel sker förrän nästa dag.
+- **Total förlustgräns**: faller kontot 8 % under startsaldot stängs allt och boten slutar handla helt.
+  Startsaldot sparas, så en omstart nollställer inte gränsen.
+- **Helgstängning**: alla positioner stängs fredag från kl. 20 (servertid), så att helggap inte kan ge
+  förluster långt förbi stop loss.
+- **Tidsfilter** (av som standard): öppna bara nya affärer mellan vissa timmar, t.ex. London/New York.
+  Använd inte med D1, eftersom dagscandles stänger vid midnatt.
 - **Spreadfilter**: inga affärer när spreaden är för stor.
 - Boten rör bara sina egna positioner (identifieras med `magic_number`).
 - Återansluter automatiskt om MT5 tappar anslutningen, och `start_bot.bat` startar om boten om den kraschar.

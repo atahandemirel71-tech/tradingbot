@@ -8,9 +8,12 @@ from datetime import date
 
 @dataclass(frozen=True)
 class RiskParams:
-    risk_per_trade_pct: float = 1.0      # % of balance lost if the stop loss is hit
+    risk_per_trade_pct: float = 0.5      # % of balance lost if the stop loss is hit
     max_open_positions: int = 3          # across all symbols, bot positions only
-    max_daily_loss_pct: float = 5.0      # stop opening trades after this equity drawdown in a day
+    max_daily_loss_pct: float = 4.0      # stop trading after this equity drawdown in a day
+    max_total_loss_pct: float = 8.0      # stop trading for good below start balance minus this
+    account_start_balance: float = 0.0   # reference for max_total_loss_pct; 0 = balance when first started
+    close_on_limit: bool = True          # also close open positions when a loss limit is hit
     max_spread_points: int = 30          # skip entries when spread is wider than this
 
 
@@ -73,3 +76,20 @@ class DailyLossGuard:
             return True
         drawdown_pct = (self._start_equity - equity) / self._start_equity * 100.0
         return drawdown_pct < self.max_daily_loss_pct
+
+
+class TotalLossGuard:
+    """Permanent stop once equity falls ``max_total_loss_pct`` below the start balance (prop-firm style)."""
+
+    def __init__(self, max_total_loss_pct: float, start_balance: float):
+        self.max_total_loss_pct = max_total_loss_pct
+        self.start_balance = start_balance
+
+    @property
+    def floor(self) -> float:
+        return self.start_balance * (1.0 - self.max_total_loss_pct / 100.0)
+
+    def breached(self, equity: float) -> bool:
+        if self.max_total_loss_pct <= 0 or self.start_balance <= 0:
+            return False
+        return equity <= self.floor

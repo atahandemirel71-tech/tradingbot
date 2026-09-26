@@ -3,14 +3,18 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+import pytest
+
 from bot.config import BotConfig
+from bot.hours import TradingHours
 from bot.mt5_client import Account, Position
 from bot.risk import RiskParams, SymbolSpec
 from bot.strategy import Signal, StrategyParams, generate_signal
 from bot.trader import Trader
 
-PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5)
-NOW = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+PARAMS = StrategyParams(fast_ema=3, slow_ema=8, trend_ema=20, rsi_period=5, atr_period=5, use_adx_filter=False)
+NOW = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)  # a Thursday
+FRIDAY_EVENING = datetime(2026, 1, 2, 21, tzinfo=timezone.utc)
 
 
 def make_bars(close):
@@ -73,7 +77,13 @@ class FakeClient:
         return True
 
 
+@pytest.fixture(autouse=True)
+def _state_in_tmp(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+
 def make_cfg(**kw):
+    kw.setdefault("risk_per_trade_pct", 1.0)
     return BotConfig(symbols=["EURUSD"], dry_run=False, strategy=PARAMS, risk=RiskParams(**kw))
 
 
@@ -123,6 +133,51 @@ def test_daily_loss_limit_blocks_new_trades():
     t.guard.update(NOW.date(), 10_000.0)
     client.equity = 9_400.0
     t.tick(NOW)
+    assert client.opened == []
+
+
+def test_daily_loss_limit_closes_open_positions():
+    client = FakeClient(make_bars(buy_series()), [Position(5, "EURUSD", Signal.SELL, 0.1, 1.1, -600.0)])
+    t = Trader(make_cfg(max_daily_loss_pct=5.0), client)
+    t.guard.update(NOW.date(), 10_000.0)
+    client.equity = 9_400.0
+    t.tick(NOW)
+    assert client.closed == [5] and client.opened == []
+
+
+def test_total_loss_limit_halts_for_good():
+    client = FakeClient(make_bars(buy_series()), [Position(5, "EURUSD", Signal.SELL, 0.1, 1.1, -900.0)])
+    t = Trader(make_cfg(max_total_loss_pct=8.0, account_start_balance=10_000.0, max_daily_loss_pct=0), client)
+    client.equity = 9_150.0
+    t.tick(NOW)
+    assert client.closed == [5]
+    client.equity = 10_000.0          # even after recovering, the bot stays stopped
+    t._last_bar.clear()
+    t.tick(NOW)
+    assert client.opened == []
+
+
+def test_start_balance_remembered_across_restarts():
+    client = FakeClient(make_bars(buy_series()))
+    Trader(make_cfg(), client).tick(NOW)
+    client.equity = 9_000.0            # a restarted bot must not take today's equity as the new start
+    client._positions.clear()
+    t2 = Trader(make_cfg(max_daily_loss_pct=0), client)
+    t2.tick(NOW)
+    assert t2.total_guard.start_balance == 10_000.0
+
+
+def test_weekend_close_and_no_new_trades_on_friday_evening():
+    client = FakeClient(make_bars(buy_series()), [Position(5, "GBPUSD", Signal.BUY, 0.1, 1.3, 12.0)])
+    Trader(make_cfg(), client).tick(FRIDAY_EVENING)
+    assert client.closed == [5] and client.opened == []
+
+
+def test_session_filter_blocks_entries_outside_hours():
+    client = FakeClient(make_bars(buy_series()))
+    cfg = make_cfg()
+    cfg.hours = TradingHours(use_session_filter=True, session_start_hour=14, session_end_hour=18)
+    Trader(cfg, client).tick(NOW)  # 12:00
     assert client.opened == []
 
 
