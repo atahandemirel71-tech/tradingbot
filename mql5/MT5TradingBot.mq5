@@ -6,7 +6,7 @@
 //|  Samma regler som Python-boten i detta projekt.                  |
 //+------------------------------------------------------------------+
 #property copyright "MT5 Trading Bot"
-#property version   "1.10"
+#property version   "1.11"
 
 #include <Trade/Trade.mqh>
 
@@ -63,6 +63,12 @@ bool     guardWarned = false;
 bool     halted = false;
 bool     weekendLogged = false;
 
+//--- Statistik som skrivs ut nar EA:n stoppas / backtesten ar klar
+int      stCrosses = 0, stSkipADX = 0, stSkipTrend = 0, stSkipRSI = 0, stSkipSame = 0;
+int      stSkipSession = 0, stSkipMaxPos = 0, stSkipSpread = 0, stSkipStops = 0, stSkipMinLot = 0;
+int      stOpened = 0, stRejected = 0, stDailyLimit = 0, stWeekend = 0;
+double   stRiskPctSum = 0.0, stRiskPctMax = 0.0, stSpreadMax = 0.0;
+
 //+------------------------------------------------------------------+
 int OnInit()
   {
@@ -103,6 +109,11 @@ int OnInit()
       PrintFormat("Totalgrans: startsaldo %.2f, EA:n stoppar vid equity %.2f", startBalance,
                   startBalance * (1.0 - InpMaxTotalLossPct / 100.0));
 
+   PrintFormat("%s: tick size %s, tick value %.5f (%s), kontrakt %.2f, lot min %.2f steg %.2f, spread nu %d points",
+               _Symbol, DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), _Digits),
+               TickValue(), AccountInfoString(ACCOUNT_CURRENCY),
+               SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE), SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN),
+               SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP), (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD));
    PrintFormat("MT5TradingBot startad pa %s %s - %s", _Symbol, EnumToString(Timeframe()),
                IsDryRun() ? "DRY RUN (inga riktiga order)" : "LIVE-HANDEL");
    if(!IsDryRun() && !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
@@ -113,6 +124,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
+   PrintSummary();
    IndicatorRelease(hFast);
    IndicatorRelease(hSlow);
    IndicatorRelease(hTrend);
@@ -183,8 +195,11 @@ bool EvaluateSignal(int &signal, double &atr)
    bool crossedUp   = fast[1] <= slow[1] && fast[0] > slow[0];
    bool crossedDown = fast[1] >= slow[1] && fast[0] < slow[0];
 
+   if(crossedUp || crossedDown)
+      stCrosses++;
    if((crossedUp || crossedDown) && InpUseADXFilter && adxBuf[0] < InpADXMin)
      {
+      stSkipADX++;
       PrintFormat("%s: EMA-kors men ADX %.1f < %.1f (ingen trend) - ingen affar", _Symbol, adxBuf[0], InpADXMin);
       return true;
      }
@@ -192,18 +207,18 @@ bool EvaluateSignal(int &signal, double &atr)
    if(crossedUp)
      {
       if(InpUseTrendFilter && close <= trend[0])
-         PrintFormat("%s: uppkors men under trend-EMA - ingen affar", _Symbol);
+        { stSkipTrend++; PrintFormat("%s: uppkors men under trend-EMA - ingen affar", _Symbol); }
       else if(rsi[0] >= InpRSIOverbought)
-         PrintFormat("%s: uppkors men RSI %.1f overkopt - ingen affar", _Symbol, rsi[0]);
+        { stSkipRSI++; PrintFormat("%s: uppkors men RSI %.1f overkopt - ingen affar", _Symbol, rsi[0]); }
       else
         { signal = 1; PrintFormat("%s: KOPSIGNAL (EMA-kors upp, RSI %.1f)", _Symbol, rsi[0]); }
      }
    else if(crossedDown)
      {
       if(InpUseTrendFilter && close >= trend[0])
-         PrintFormat("%s: nedkors men over trend-EMA - ingen affar", _Symbol);
+        { stSkipTrend++; PrintFormat("%s: nedkors men over trend-EMA - ingen affar", _Symbol); }
       else if(rsi[0] <= InpRSIOversold)
-         PrintFormat("%s: nedkors men RSI %.1f oversalt - ingen affar", _Symbol, rsi[0]);
+        { stSkipRSI++; PrintFormat("%s: nedkors men RSI %.1f oversalt - ingen affar", _Symbol, rsi[0]); }
       else
         { signal = -1; PrintFormat("%s: SALJSIGNAL (EMA-kors ned, RSI %.1f)", _Symbol, rsi[0]); }
      }
@@ -224,6 +239,7 @@ void HandleSignal(int signal, double atr)
          continue;
       if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == wanted)
         {
+         stSkipSame++;
          PrintFormat("%s: har redan en position at samma hall", _Symbol);
          return;
         }
@@ -250,9 +266,9 @@ void HandleSignal(int signal, double atr)
 void OpenPosition(int signal, double atr)
   {
    if(!EntriesAllowed(TimeCurrent()))
-     { PrintFormat("%s: utanfor handelstiderna - ingen ny affar", _Symbol); return; }
+     { stSkipSession++; PrintFormat("%s: utanfor handelstiderna - ingen ny affar", _Symbol); return; }
    if(CountMyPositions() >= InpMaxOpenPositions)
-     { PrintFormat("%s: max antal oppna positioner (%d) natt", _Symbol, InpMaxOpenPositions); return; }
+     { stSkipMaxPos++; PrintFormat("%s: max antal oppna positioner (%d) natt", _Symbol, InpMaxOpenPositions); return; }
    if(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) != SYMBOL_TRADE_MODE_FULL)
      { PrintFormat("%s: symbolen gar inte att handla just nu", _Symbol); return; }
 
@@ -264,8 +280,9 @@ void OpenPosition(int signal, double atr)
       return;
 
    double spreadPoints = (ask - bid) / point;
+   stSpreadMax = MathMax(stSpreadMax, spreadPoints);
    if(spreadPoints > InpMaxSpreadPoints)
-     { PrintFormat("%s: spread %.0f > max %d points - hoppar over", _Symbol, spreadPoints, InpMaxSpreadPoints); return; }
+     { stSkipSpread++; PrintFormat("%s: spread %.0f > max %d points - hoppar over", _Symbol, spreadPoints, InpMaxSpreadPoints); return; }
 
    double entry  = signal > 0 ? ask : bid;
    double slDist = atr * InpSLATRMult;
@@ -275,33 +292,47 @@ void OpenPosition(int signal, double atr)
 
    double minDist = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 1) * point;
    if(MathAbs(entry - sl) < minDist || MathAbs(entry - tp) < minDist)
-     { PrintFormat("%s: SL/TP for nara brokerns minimum - hoppar over", _Symbol); return; }
+     { stSkipStops++; PrintFormat("%s: SL/TP for nara brokerns minimum - hoppar over", _Symbol); return; }
 
    double volume = LotSize(MathAbs(entry - sl));
    if(volume <= 0)
-     { PrintFormat("%s: positionsstorlek under brokerns minimum for %.2f %% risk", _Symbol, InpRiskPercent); return; }
+     { stSkipMinLot++; PrintFormat("%s: positionsstorlek under brokerns minimum for %.2f %% risk", _Symbol, InpRiskPercent); return; }
 
-   PrintFormat("%s: OPPNAR %s %.2f lots @ %s SL=%s TP=%s", _Symbol, signal > 0 ? "KOP" : "SALJ", volume,
-               DoubleToString(entry, digits), DoubleToString(sl, digits), DoubleToString(tp, digits));
+   double riskMoney = MathAbs(entry - sl) / SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE) * TickValue() * volume;
+   double riskPct = riskMoney / AccountInfoDouble(ACCOUNT_BALANCE) * 100.0;
+   PrintFormat("%s: OPPNAR %s %.2f lots @ %s SL=%s TP=%s (risk %.2f = %.2f %% av saldot)", _Symbol,
+               signal > 0 ? "KOP" : "SALJ", volume, DoubleToString(entry, digits), DoubleToString(sl, digits),
+               DoubleToString(tp, digits), riskMoney, riskPct);
    if(IsDryRun())
      { Print("DRY RUN: order skickades inte (satt InpDryRun = false for riktig handel)"); return; }
 
    bool ok = signal > 0 ? trade.Buy(volume, _Symbol, ask, sl, tp, "MT5TradingBot")
                         : trade.Sell(volume, _Symbol, bid, sl, tp, "MT5TradingBot");
    if(!ok || (trade.ResultRetcode() != TRADE_RETCODE_DONE && trade.ResultRetcode() != TRADE_RETCODE_PLACED))
+     {
+      stRejected++;
       PrintFormat("%s: order avvisad: %u %s", _Symbol, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      return;
+     }
+   stOpened++;
+   stRiskPctSum += riskPct;
+   stRiskPctMax = MathMax(stRiskPctMax, riskPct);
   }
 
 //+------------------------------------------------------------------+
 //| Lots sa att en traffad SL kostar ca InpRiskPercent % av saldot.  |
 //+------------------------------------------------------------------+
+double TickValue()
+  {
+   double v = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
+   return v > 0 ? v : SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+  }
+
 double LotSize(double slDistance)
   {
    double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
    double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
-   if(tickValue <= 0)
-      tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickValue = TickValue();
    double volMin  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double volMax  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double volStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
@@ -385,6 +416,7 @@ bool CheckLimits()
          PrintFormat("Daglig forlustgrans %.1f %% nadd (start %.2f, nu %.2f) - ingen handel resten av dagen",
                      InpMaxDailyLossPct, dayStartEquity, equity);
          guardWarned = true;
+         stDailyLimit++;
          if(InpCloseOnLimit)
             CloseAllMine(true, "daglig grans", true);
         }
@@ -396,7 +428,10 @@ bool CheckLimits()
       if(!IsDryRun() || !weekendLogged)
          CloseAllMine(false, "helgstangning", !weekendLogged);
       if(!weekendLogged)
+        {
+         stWeekend++;
          PrintFormat("%s: helgstangning - inga nya affarer forran marknaden oppnar igen", _Symbol);
+        }
       weekendLogged = true;
       return false;
      }
@@ -450,5 +485,26 @@ void CloseAllMine(bool allSymbols, string reason, bool verbose)
       if(!trade.PositionClose(ticket))
          PrintFormat("Kunde inte stanga #%I64u: %s", ticket, trade.ResultRetcodeDescription());
      }
+  }
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Sammanfattning langst ner i Journal/Experter.                    |
+//+------------------------------------------------------------------+
+void PrintSummary()
+  {
+   Print("================ MT5TradingBot SAMMANFATTNING ================");
+   PrintFormat("EMA-korsningar: %d", stCrosses);
+   PrintFormat("  bortfiltrerade: ADX %d, trend-EMA %d, RSI %d", stSkipADX, stSkipTrend, stSkipRSI);
+   PrintFormat("  hoppade over: redan position %d, handelstid %d, max positioner %d, spread %d, SL/TP-minimum %d, minsta lot %d",
+               stSkipSame, stSkipSession, stSkipMaxPos, stSkipSpread, stSkipStops, stSkipMinLot);
+   PrintFormat("Oppnade affarer: %d (avvisade av brokern: %d)", stOpened, stRejected);
+   if(stOpened > 0)
+      PrintFormat("Planerad risk per affar: snitt %.2f %%, max %.2f %% (installt %.2f %%)",
+                  stRiskPctSum / stOpened, stRiskPctMax, InpRiskPercent);
+   PrintFormat("Dagsgrans nadd: %d ggr, helgstangningar: %d, total grans nadd: %s", stDailyLimit, stWeekend,
+               halted ? "JA" : "nej");
+   PrintFormat("Storsta spread vid signal: %.0f points (max tillatet %d)", stSpreadMax, InpMaxSpreadPoints);
+   Print("==============================================================");
   }
 //+------------------------------------------------------------------+
