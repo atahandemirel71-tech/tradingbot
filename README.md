@@ -16,6 +16,23 @@ En Python-bot som kopplar upp sig mot MetaTrader 5 och automatiskt köper och s�
 
 Detaljerna nedan förklarar varje steg.
 
+## Alternativ: Expert Advisor direkt i MT5 (ingen Python behövs)
+
+Python-boten körs som ett eget program **bredvid** MT5 och syns därför inte i MT5:s Navigator.
+Vill du ha boten **inne i MT5** använder du `mql5/MT5TradingBot.mq5` – samma strategi och riskregler.
+
+1. I MT5: *Arkiv → Öppna datamapp* (File → Open Data Folder).
+2. Gå till `MQL5\Experts` och kopiera in `MT5TradingBot.mq5`.
+3. Tryck **F4** (öppnar MetaEditor), öppna filen och tryck **F7** (Kompilera). Det ska stå `0 errors`.
+4. Tillbaka i MT5: högerklicka *Expert Advisors* i Navigator (Ctrl+N) → *Uppdatera*. `MT5TradingBot` syns nu.
+5. Öppna ett diagram (t.ex. EURUSD, M15) och dra EA:n till diagrammet. Bocka i **Allow Algo Trading**
+   och slå på knappen **Algo Trading** i verktygsfältet.
+6. `InpDryRun = true` betyder att den bara loggar (fliken *Experter*). Sätt `false` för att handla på riktigt.
+   Dra EA:n till ett diagram per symbol du vill handla.
+
+**Backtest i MT5:** tryck *Ctrl+R* (Strategitestare), välj `MT5TradingBot`, symbol, tidsram och period
+och klicka *Starta*. I testaren handlar EA:n alltid, oavsett `InpDryRun`.
+
 ## Hur den handlar
 
 Strategi (trendföljande) på stängda candles, per symbol:
@@ -142,5 +159,6 @@ Testerna använder en simulerad MT5-klient och kan köras på vilket operativsys
 | `bot/risk.py` | Positionsstorlek och daglig förlustgräns |
 | `bot/trader.py` | Huvudloopen som handlar |
 | `bot/mt5_client.py` | Kommunikation med MetaTrader 5 |
+| `mql5/MT5TradingBot.mq5` | Samma bot som Expert Advisor inne i MT5 |
 | `backtest.py` | Backtest från MT5 eller CSV |
 | `bot/backtest.py` | Backtestmotorn |
