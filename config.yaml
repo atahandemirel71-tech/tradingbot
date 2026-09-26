@@ -1,0 +1,46 @@
+# ===== MT5 Trading Bot - inställningar =====
+# Inloggning (konto, lösenord, server) läggs i .env - se .env.example
+
+# Symboler att handla (måste finnas hos din broker, t.ex. "EURUSD" eller "EURUSD.m")
+symbols:
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+
+# Tidsram för candles: M1, M5, M15, M30, H1, H4, D1
+timeframe: M15
+
+# Unikt ID så boten bara rör sina egna positioner
+magic_number: 20260926
+
+# Hur ofta (sekunder) boten kollar efter nya candles
+poll_seconds: 10
+
+# true = simulera bara (loggar vad den SKULLE göra). Sätt till false för riktig handel.
+dry_run: true
+
+# Stäng befintlig position när motsatt signal kommer
+close_on_opposite_signal: true
+
+# Max tillåten slippage i points
+deviation_points: 20
+
+log_file: logs/bot.log
+
+strategy:
+  fast_ema: 9
+  slow_ema: 21
+  trend_ema: 200          # köp bara över / sälj bara under denna EMA
+  use_trend_filter: true
+  rsi_period: 14
+  rsi_overbought: 70      # inga köp när RSI är över detta
+  rsi_oversold: 30        # inga sälj när RSI är under detta
+  atr_period: 14
+  sl_atr_mult: 1.5        # stop loss = 1.5 x ATR
+  tp_atr_mult: 3.0        # take profit = 3.0 x ATR
+
+risk:
+  risk_per_trade_pct: 1.0   # % av saldot som riskeras per affär
+  max_open_positions: 3     # totalt över alla symboler
+  max_daily_loss_pct: 5.0   # pausa nya affärer resten av dagen efter så här stor förlust
+  max_spread_points: 30     # hoppa över affärer vid för stor spread
