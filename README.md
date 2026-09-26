@@ -6,6 +6,16 @@ En Python-bot som kopplar upp sig mot MetaTrader 5 och automatiskt köper och s�
 > Ingen strategi vinner garanterat. Kör boten på ett **demokonto** i flera veckor innan du
 > ens överväger riktiga pengar. Boten startar i `dry_run: true` (simulering) som standard.
 
+## Snabbstart (Windows)
+
+1. Installera **MetaTrader 5** och logga in på ett **demokonto**. Slå på knappen **Algo Trading**.
+2. Installera **Python 3.10+** från python.org (bocka i "Add Python to PATH").
+3. Packa upp zip-filen och dubbelklicka **`installera.bat`** – fyll i konto/lösenord/server när anteckningar öppnas.
+4. Dubbelklicka **`backtest.bat`** för att testa strategin på historisk data.
+5. Dubbelklicka **`start_bot.bat`** för att starta boten (simulering tills du sätter `dry_run: false`).
+
+Detaljerna nedan förklarar varje steg.
+
 ## Hur den handlar
 
 Strategi (trendföljande) på stängda candles, per symbol:
